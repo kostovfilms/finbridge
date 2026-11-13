@@ -1,0 +1,12 @@
+{
+  "name": "finbridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "FinBridge: липсващи документи, засичане с банката и експорт за счетоводни кантори",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node --no-warnings server.js",
+    "test": "node --no-warnings test/core.test.js && node --no-warnings test/api.test.js",
+    "test:e2e": "node --no-warnings test/e2e.js"
+  }
+}

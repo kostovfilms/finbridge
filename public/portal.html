@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Документи за счетоводството</title>
+<style>
+:root{--bg:#f1f4f5;--surface:#fff;--line:#d3dbdd;--ink:#16252a;--muted:#5b6d73;--accent:#0e6b74;--accent-ink:#fff;--good:#1d7a46;--crit:#b3261e}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#0f1719;--surface:#172124;--line:#2f4045;--ink:#e4ecee;--muted:#93a6ab;--accent:#4fc0c9;--accent-ink:#06262a;--good:#6fd39a;--crit:#ff8f87}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Segoe UI",Arial,sans-serif;padding:24px 16px}
+main{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:16px}h1{font-size:22px;margin:0;line-height:1.25}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px}ul{margin:8px 0 0;padding-left:20px}li{margin:4px 0;overflow-wrap:anywhere}p{margin:0}
+.pick{display:block;text-align:center;font-weight:600;border-radius:10px;padding:14px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
+input[type=file]{position:absolute;width:1px;height:1px;opacity:0}input[type=text]{width:100%;font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:9px 10px;margin-top:10px}
+#log{list-style:none;padding:0;margin:0}#log li{padding:6px 0;border-top:1px solid var(--line)}.ok{color:var(--good)}.no{color:var(--crit)}.dim{color:var(--muted);font-size:14px}
+input:focus-visible + .pick,:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style></head><body><main>
+<h1>Документи за {{FIRM}}</h1>
+<div class="card">{{LIST}}</div>
+<div class="card">
+  <input type="file" id="files" multiple accept="image/*,application/pdf,.pdf"><label class="pick" for="files">Снимай или избери фактури</label>
+  <input type="text" id="note" maxlength="300" placeholder="Бележка към счетоводителя (по желание)" aria-label="Бележка към счетоводителя">
+  <p class="dim" style="margin-top:10px">Приемат се снимки и PDF до 15 MB. Файловете отиват направо при счетоводителя ви.</p>
+</div>
+<ul id="log" aria-live="polite"></ul>
+</main>
+<script>
+const log = document.getElementById('log');
+document.getElementById('files').onchange = async e => {
+  const files = [...e.target.files]; e.target.value = '';
+  for (const f of files){
+    const li = document.createElement('li'); li.textContent = f.name + ': качва се…'; log.prepend(li);
+    try {
+      const r = await fetch(location.pathname + '/upload?name=' + encodeURIComponent(f.name) + '&note=' + encodeURIComponent(document.getElementById('note').value), { method: 'POST', body: f });
+      if (r.ok){ li.textContent = f.name + ': получен'; li.className = 'ok'; }
+      else { li.textContent = f.name + ': ' + ((await r.json().catch(() => ({}))).message || 'не беше приет'); li.className = 'no'; }
+    } catch (x) { li.textContent = f.name + ': няма връзка, опитайте пак'; li.className = 'no'; }
+  }
+};
+</script></body></html>

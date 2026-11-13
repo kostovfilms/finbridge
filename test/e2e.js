@@ -1,0 +1,45 @@
+const {chromium}=require(process.env.PLAYWRIGHT||'/opt/npm-tools/node_modules/playwright');const assert=require('node:assert'),fs=require('node:fs'),path=require('node:path');const H=require('./helpers');
+const B='http://127.0.0.1:8811',FX=f=>path.join(__dirname,'fixtures',f);let n=0;const ok=m=>console.log('ok   '+(++n)+'. '+m);let page;
+(async()=>{
+  const ai=await H.mockAI(8812,H.invoiceReply),smtp=await H.fakeSMTP(8813);
+  const srv=await H.startServer(8811,{ANTHROPIC_API_KEY:'sk-test',ANTHROPIC_BASE_URL:'http://127.0.0.1:8812',SMTP_HOST:'127.0.0.1',SMTP_PORT:'8813',SMTP_SECURE:'false',SMTP_FROM:'no-reply@kantora.test'});
+  const b=await chromium.launch({executablePath:process.env.CHROME||'/usr/bin/google-chrome'});
+  try{
+  const ctx=await b.newContext({viewport:{width:1280,height:900},acceptDownloads:true,permissions:['clipboard-read','clipboard-write']});await ctx.route('**/fonts.g*/**',r=>r.abort());
+  const p=page=await ctx.newPage();const errs=[];p.on('pageerror',e=>errs.push(e.message));p.on('console',m=>{if(m.type()==='error'&&!/Failed to load resource/.test(m.text()))errs.push(m.text())});
+  const txt=()=>p.locator('#main').innerText();
+  await p.goto(B+'/');await p.waitForURL(/\/login/);await p.click('#swap');await p.fill('#office','Кантора Баланс');await p.fill('#email','ivan@kantora.test');await p.fill('#password','short');await p.click('#go');
+  await p.waitForSelector('text=поне 10 знака');await p.fill('#password','dostatachno-dalga');await p.click('#go');await p.waitForSelector('text=Как се работи');
+  assert((await p.locator('#foot').innerText()).includes('Кантора Баланс'));ok('sign-up through the login page, weak password rejected, lands in the app');
+  await p.click('text=Добави фирма');await p.fill('#firm-name','Варна Строй Инвест ООД');await p.fill('#firm-eik','203456781');await p.fill('#firm-contact','Петър');await p.selectOption('#firm-channel','Имейл');await p.fill('#firm-address','petar@firma.test');
+  await p.click('button:has-text("Запази")');await p.waitForSelector('tr:has-text("Варна Строй Инвест ООД")');await p.fill('#period','2026-10');
+  await p.goto(B+'/#reconcile');await p.setInputFiles('#stmt-file',FX('izvlechenie_2026-10.csv'));await p.click('button:has-text("Импортирай")');await p.waitForSelector('text=Импортирани 11 плащания');ok('firm created and CSV statement imported on the server');
+  await p.goto(B+'/#clients');await p.click('button:has-text("Редактирай")');await p.waitForSelector('#portal-url');const portal=await p.locator('#portal-url').innerText();assert(portal.startsWith(B+'/u/'));await p.click('button:has-text("Отказ")');
+  const cctx=await b.newContext({viewport:{width:390,height:800}});const c=await cctx.newPage();await c.goto(portal);let t=await c.locator('main').innerText();
+  assert(t.includes('Документи за Варна Строй Инвест ООД')&&t.includes('Липсват документи за 7 плащания')&&t.includes('GORIVO PLUS AD')&&!t.includes('Заплати')&&!t.includes('Община'),t);
+  assert(await c.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));await c.fill('#note','платено с фирмената карта');await c.setInputFiles('#files',[FX('faktura_gorivo.pdf'),FX('izvlechenie_2026-10.csv')]);
+  await c.waitForSelector('li.ok:has-text("faktura_gorivo.pdf: получен")');await c.waitForSelector('li.no:has-text("izvlechenie_2026-10.csv")');await cctx.close();ok('client opens the link on a phone without login, sees the 7 missing payments, uploads a PDF; a non-document is refused');
+  await p.reload();await p.waitForSelector('tr:has-text("Варна Строй Инвест ООД") .pill:has-text("1 нов файл")');await p.goto(B+'/#inbox');await p.waitForSelector('text=Клиентът е качил 1 нов файл');assert((await txt()).includes('платено с фирмената карта'));
+  await p.click('button:has-text("Разчети ги")');await p.waitForSelector('text=Обработени 1 файл',{timeout:60000});t=await txt();assert(t.includes('автоматично засечени с плащане: 1')&&t.includes('От клиента')&&t.includes('Платен на 05.10'),t);
+  assert(!(await txt()).includes('Клиентът е качил'));const href=await p.locator('a:has-text("Виж оригинала")').getAttribute('href');const orig=await p.request.get(B+href);assert.equal(orig.headers()['content-type'],'application/pdf');assert((await orig.body()).equals(fs.readFileSync(FX('faktura_gorivo.pdf'))));
+  const call=ai.calls[0].body.messages[0].content;assert(call[0].type==='image'&&call[0].source.media_type==='image/jpeg'&&call[0].source.data.length>5000&&call[1].text.includes('ФАКТУРА № 1000000414'));
+  ok('accountant sees the client file and note, one click reads it via the server-side Claude call (PDF page image + text), it is matched, original stays downloadable');
+  await p.setInputFiles('#doc-files',[FX('faktura_beton.pdf'),FX('faktura_naem.png')]);await p.waitForSelector('text=Обработени 2 файла',{timeout:60000});assert((await txt()).includes('автоматично засечени с плащане: 2'));
+  assert.equal(fs.readdirSync(path.join(srv.dir,'files')).length,3);ok('accountant uploads (PDF + photo) are read, matched and their originals stored');
+  await p.goto(B+'/#reminders');await p.waitForSelector('#rem-text');const rem=await p.inputValue('#rem-text');assert(rem.includes('4 плащания')&&rem.includes('Можете да ги качите направо тук: '+portal),rem);
+  await p.click('button:has-text("Изпрати по имейл")');await p.waitForSelector('text=Имейлът е изпратен до petar@firma.test');assert.equal(smtp.mails.length,1);
+  assert.equal(Buffer.from(smtp.mails[0].body.split('\n\n')[1].replace(/\n/g,''),'base64').toString(),rem);await p.waitForSelector('td:has-text("4 плащания")');ok('reminder contains the upload link, is really sent by email and logged');
+  await p.goto(B+'/#export');await p.waitForSelector('#export-pre');const [dl]=await Promise.all([p.waitForEvent('download'),p.click('button:has-text("Изтегли CSV")')]);const csv=fs.readFileSync(await dl.path());
+  assert.equal(dl.suggestedFilename(),'finbridge_dokumenti_2026-10.csv');assert(csv[0]===0xEF&&csv[1]===0xBB&&csv[2]===0xBF);const lines=csv.toString('utf8').split('\r\n');assert.equal(lines.length,4);
+  assert(lines.some(l=>l.includes(';1000000416;Бетон Трейд ООД;507081372;BG507081372;1950,00;390,00;2340,00;EUR;12.10.2026;2340,00;')));ok('export downloads a real CSV file with BOM and the 3 matched documents');
+  await p.click('#foot button:has-text("Изход")');await p.waitForURL(/\/login/);await p.goto(B+'/#clients');await p.waitForURL(/\/login/);await p.fill('#email','ivan@kantora.test');await p.fill('#password','dostatachno-dalga');await p.click('#go');
+  await p.waitForSelector('text=Чака 4 документа');assert((await txt()).includes('3 от 7 плащания с документ'));ok('logout, login again: everything is still there');
+  await p.click('text=Добави фирма');await p.fill('#firm-name','Екселска ЕООД');await p.click('button:has-text("Запази")');await p.waitForSelector('tr:has-text("Екселска ЕООД")');await p.click('tr:has-text("Екселска ЕООД")');await p.waitForSelector('text=няма плащания за октомври 2026');
+  await p.setInputFiles('#stmt-file',FX('izvlechenie.xlsx'));await p.waitForSelector('text=Формат: Excel');t=await txt();assert(t.includes('Открити 3 движения: 2 изходящи и 1 входящи')&&t.includes('03.10')&&t.includes('-1 234,56')&&t.includes('5 000,00'),t);
+  await p.click('button:has-text("Импортирай")');await p.waitForSelector('text=Импортирани 3 плащания');assert.equal(await p.locator('.pill.miss').count(),1);ok('Excel (.xlsx) statement read by the built-in reader: dates, debit/credit columns, totals row skipped');
+  await p.waitForTimeout(400);const ctx2=await b.newContext();const o=await ctx2.newPage();await o.goto(B+'/login');await o.click('#swap');await o.fill('#office','Друга кантора');await o.fill('#email','other@kantora.test');await o.fill('#password','sasvem-druga-parola');await o.click('#go');
+  await o.waitForSelector('text=Как се работи');assert(!(await o.locator('body').innerText()).includes('Варна Строй'));assert.equal((await o.request.get(B+href)).status(),404);await ctx2.close();ok('a second office sees none of the first office data or files');
+  assert.deepEqual(errs,[]);ok('no console or page errors');
+  console.log('E2E: all '+n+' steps passed');
+  }finally{await b.close();srv.stop();ai.close();smtp.close()}
+})().catch(async e=>{try{console.error('MAIN',(await page.locator('body').innerText()).slice(0,700))}catch(_){};console.error('E2E FAIL at step '+(n+1)+':',e.message.slice(0,900));process.exit(1)});
