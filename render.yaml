@@ -1,0 +1,32 @@
+# Render Blueprint: https://render.com/deploy?repo=https://github.com/kostovfilms/finbridge
+# Безплатният план няма постоянен диск: данните се губят при рестарт. За реална работа
+# сменете plan на starter и разкоментирайте disk и DATA_DIR.
+services:
+  - type: web
+    name: finbridge
+    runtime: node
+    plan: free
+    buildCommand: "true"
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: TRUST_PROXY
+        value: "true"
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      # - key: DATA_DIR
+      #   value: /data
+    # disk:
+    #   name: finbridge-data
+    #   mountPath: /data
+    #   sizeGB: 1
