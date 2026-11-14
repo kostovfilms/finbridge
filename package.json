@@ -6,7 +6,7 @@
   "engines": { "node": ">=22.13" },
   "scripts": {
     "start": "node --no-warnings server.js",
-    "test": "node --no-warnings test/core.test.js && node --no-warnings test/api.test.js",
+    "test": "node --no-warnings test/core.test.js && node --no-warnings test/api.test.js && node --no-warnings test/api2.test.js",
     "test:e2e": "node --no-warnings test/e2e.js"
   }
 }

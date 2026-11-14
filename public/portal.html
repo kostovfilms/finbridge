@@ -8,7 +8,7 @@ main{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:16px}h
 .card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px}ul{margin:8px 0 0;padding-left:20px}li{margin:4px 0;overflow-wrap:anywhere}p{margin:0}
 .pick{display:block;text-align:center;font-weight:600;border-radius:10px;padding:14px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
 input[type=file]{position:absolute;width:1px;height:1px;opacity:0}input[type=text]{width:100%;font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:9px 10px;margin-top:10px}
-#log{list-style:none;padding:0;margin:0}#log li{padding:6px 0;border-top:1px solid var(--line)}.ok{color:var(--good)}.no{color:var(--crit)}.dim{color:var(--muted);font-size:14px}
+.nodoc,.sendnote{font:inherit;font-size:14px;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:8px;padding:3px 9px;cursor:pointer;margin-left:6px}.reply{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}.reply input{flex:1;min-width:180px;margin-top:0}#log{list-style:none;padding:0;margin:0}#log li{padding:6px 0;border-top:1px solid var(--line)}.ok{color:var(--good)}.no{color:var(--crit)}.dim{color:var(--muted);font-size:14px}
 input:focus-visible + .pick,:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 </style></head><body><main>
 <h1>Документи за {{FIRM}}</h1>
@@ -22,6 +22,26 @@ input:focus-visible + .pick,:focus-visible{outline:2px solid var(--accent);outli
 </main>
 <script>
 const log = document.getElementById('log');
+document.addEventListener('click', async e => {
+  const b = e.target.closest('button.nodoc, button.sendnote'); if (!b) return;
+  const li = b.closest('li');
+  if (b.classList.contains('nodoc')){
+    b.remove();
+    const box = document.createElement('div'); box.className = 'reply';
+    box.innerHTML = '<input type="text" maxlength="300" placeholder="Какво е това плащане? Напр. лично, без фактура" aria-label="Обяснение за плащането"><button type="button" class="sendnote">Изпрати</button>';
+    li.appendChild(box); box.firstChild.focus(); return;
+  }
+  const input = li.querySelector('input'), box = li.querySelector('.reply');
+  b.disabled = true;
+  try {
+    const r = await fetch(location.pathname + '/reply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ period: li.dataset.period, tx: li.dataset.tx, note: input.value }) });
+    if (r.ok){ box.innerHTML = '<span class="ok">Изпратено на счетоводителя.</span>'; return; }
+    let err = box.querySelector('.no'); if (!err){ err = document.createElement('div'); err.className = 'no'; box.appendChild(err); }
+    err.textContent = (await r.json().catch(() => ({}))).message || 'Не беше изпратено.';
+  } catch (x) { alertless(box); }
+  b.disabled = false;
+});
+function alertless(box){ let err = box.querySelector('.no'); if (!err){ err = document.createElement('div'); err.className = 'no'; box.appendChild(err); } err.textContent = 'Няма връзка, опитайте пак.'; }
 document.getElementById('files').onchange = async e => {
   const files = [...e.target.files]; e.target.value = '';
   for (const f of files){

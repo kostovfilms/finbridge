@@ -7,13 +7,15 @@ const env = process.env;
 const PORT = +env.PORT || 8080;
 const DATA = path.resolve(env.DATA_DIR || path.join(__dirname, 'data'));
 const PUB = path.join(__dirname, 'public');
-const BASE_URL = (env.BASE_URL || '').replace(/\/+$/, '');
+const BASE_URL = (env.BASE_URL || env.RENDER_EXTERNAL_URL || '').replace(/\/+$/, '');
 const AI = { key: env.ANTHROPIC_API_KEY || '', url: (env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/+$/, ''), model: env.ANTHROPIC_MODEL || 'claude-sonnet-5-5' };
 const SMTP = { host: env.SMTP_HOST || '', port: +env.SMTP_PORT || 465, user: env.SMTP_USER || '', pass: env.SMTP_PASS || '', from: env.SMTP_FROM || env.SMTP_USER || '', secure: env.SMTP_SECURE !== 'false' };
 const ALLOW_SIGNUP = env.ALLOW_SIGNUP !== 'false';
 const TRUST_PROXY = env.TRUST_PROXY === 'true';
 const MAX_FILE = 15 * 1024 * 1024, MAX_JSON = 1024 * 1024, MAX_AI = 14 * 1024 * 1024;
 const SESSION_DAYS = 30;
+const REMIND = { days: +env.REMIND_EVERY_DAYS || 3, tick: +env.REMIND_INTERVAL_MS || 1800000, anytime: env.REMIND_ANYTIME === 'true' };
+const Core = new Function(fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8').split('/*CORE-START*/')[1].split('/*CORE-END*/')[0] + ';return Core')();
 
 fs.mkdirSync(path.join(DATA, 'files'), { recursive: true });
 const db = new DatabaseSync(path.join(DATA, 'finbridge.db'));
@@ -26,6 +28,9 @@ CREATE TABLE IF NOT EXISTS firms(office_id TEXT NOT NULL, id TEXT NOT NULL, data
 CREATE TABLE IF NOT EXISTS periods(office_id TEXT NOT NULL, firm_id TEXT NOT NULL, period TEXT NOT NULL, data TEXT NOT NULL, version INTEGER NOT NULL, updated TEXT NOT NULL, PRIMARY KEY(office_id, firm_id, period));
 CREATE TABLE IF NOT EXISTS files(id TEXT PRIMARY KEY, office_id TEXT NOT NULL, firm_id TEXT NOT NULL, name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, source TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, created TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS files_inbox ON files(office_id, status);
+CREATE TABLE IF NOT EXISTS replies(id TEXT PRIMARY KEY, office_id TEXT NOT NULL, firm_id TEXT NOT NULL, period TEXT NOT NULL, tx_id TEXT NOT NULL, note TEXT NOT NULL, status TEXT NOT NULL, created TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS autolog(office_id TEXT NOT NULL, firm_id TEXT NOT NULL, sent_at TEXT NOT NULL, count INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS resets(token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires INTEGER NOT NULL);
 `);
 const q = sql => db.prepare(sql);
 const now = () => new Date().toISOString();
@@ -100,7 +105,19 @@ function storeFile(officeId, firmId, name, buf, source, note){
   return id;
 }
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
-const firmOut = (req, r) => Object.assign(JSON.parse(r.data), { id: r.id, portal: origin(req) + '/u/' + r.portal_token });
+const firmOut = (req, r) => { const last = q('SELECT MAX(sent_at) AS t FROM autolog WHERE office_id = ? AND firm_id = ?').get(r.office_id, r.id).t;
+  return Object.assign(JSON.parse(r.data), { id: r.id, portal: origin(req) + '/u/' + r.portal_token }, last ? { lastAuto: last.slice(0, 10) } : {}); };
+/* Плащания без документ за фирма: от последните месеци, без тези с чакащ отговор от клиента. */
+function missingFor(officeId, firmId, beforePeriod){
+  const pending = new Set(q("SELECT period || '/' || tx_id AS k FROM replies WHERE office_id = ? AND firm_id = ? AND status = 'new'").all(officeId, firmId).map(r => r.k));
+  const out = [];
+  for (const r of q('SELECT period, data FROM periods WHERE office_id = ? AND firm_id = ? ORDER BY period DESC LIMIT 3').all(officeId, firmId)){
+    if (beforePeriod && r.period >= beforePeriod) continue;
+    let p; try { p = JSON.parse(r.data); } catch (e) { continue; }
+    for (const t of p.txs || []) if (t.needsDoc && !t.docId && t.amount < 0) out.push({ period: r.period, tx: t, replied: pending.has(r.period + '/' + t.id) });
+  }
+  return out.sort((a, b) => String(a.tx.date).localeCompare(String(b.tx.date)));
+}
 
 /* ---------- e-mail (SMTP) ---------- */
 function sendMail({ to, subject, text, replyTo }){
@@ -166,17 +183,42 @@ const html = (res, body, status) => send(res, status || 200, body, { 'Content-Ty
 const STATIC = { '/shim.js': 'text/javascript', '/vendor/pdf.min.js': 'text/javascript', '/vendor/pdf.worker.min.js': 'text/javascript' };
 const money = n => Math.abs(n).toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 function portalPage(firm){
-  const d = JSON.parse(firm.data);
-  const rows = q('SELECT period, data FROM periods WHERE office_id = ? AND firm_id = ? ORDER BY period DESC LIMIT 3').all(firm.office_id, firm.id);
-  const missing = [];
-  for (const r of rows){ let p; try { p = JSON.parse(r.data); } catch (e) { continue; }
-    for (const t of p.txs || []) if (t.needsDoc && !t.docId && t.amount < 0) missing.push(t); }
-  missing.sort((a, b) => String(a.date).localeCompare(String(b.date)));
-  const list = missing.length ? '<p>Липсват документи за ' + missing.length + (missing.length === 1 ? ' плащане' : ' плащания') + ':</p><ul>' +
-    missing.slice(0, 100).map(t => '<li><b>' + esc(String(t.date).slice(8, 10) + '.' + String(t.date).slice(5, 7)) + '</b> · ' + esc(t.cp) + ' · ' + esc(money(+t.amount || 0)) + '</li>').join('') + '</ul>'
+  const d = JSON.parse(firm.data), all = missingFor(firm.office_id, firm.id), open = all.filter(x => !x.replied);
+  const li = x => '<li data-period="' + esc(x.period) + '" data-tx="' + esc(x.tx.id) + '"><b>' + esc(String(x.tx.date).slice(8, 10) + '.' + String(x.tx.date).slice(5, 7)) + '</b> · ' + esc(x.tx.cp) + ' · ' + esc(money(+x.tx.amount || 0)) +
+    (x.replied ? ' <span class="dim">(изпратено обяснение)</span>' : ' <button type="button" class="nodoc">Няма документ</button>') + '</li>';
+  const list = all.length ? '<p>' + (open.length ? 'Липсват документи за ' + open.length + (open.length === 1 ? ' плащане' : ' плащания') + ':' : 'За всички плащания сте изпратили обяснение.') + '</p><ul id="missing">' + all.slice(0, 100).map(li).join('') + '</ul>'
     : '<p>В момента няма плащания, за които да липсва документ. Можете да качите документи и предварително.</p>';
   return page('portal.html').replace('{{FIRM}}', esc(d.name || '')).replace('{{LIST}}', list);
 }
+
+/* ---------- автоматични напомняния ---------- */
+function sofia(){ const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Sofia', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', weekday: 'short', hour12: false }).formatToParts(new Date()).map(x => [x.type, x.value])); return { period: p.year + '-' + p.month, hour: +p.hour, weekday: p.weekday }; }
+let ticking = false;
+async function remindTick(){
+  if (ticking || !(SMTP.host && SMTP.from)) return 0;
+  const t = sofia();
+  if (!REMIND.anytime && (t.hour < 9 || t.hour >= 18 || t.weekday === 'Sat' || t.weekday === 'Sun')) return 0;
+  ticking = true; let sent = 0;
+  try {
+    for (const f of q('SELECT * FROM firms').all()){
+      let d; try { d = JSON.parse(f.data); } catch (e) { continue; }
+      const to = String(d.address || '').trim();
+      if (!d.auto || !EMAIL.test(to)) continue;
+      const last = q('SELECT MAX(sent_at) AS t FROM autolog WHERE office_id = ? AND firm_id = ?').get(f.office_id, f.id).t;
+      if (last && Date.now() - Date.parse(last) < REMIND.days * 864e5 - 60000) continue;
+      const open = missingFor(f.office_id, f.id, t.period).filter(x => !x.replied);
+      if (!open.length) continue;
+      const per = open[open.length - 1].period, list = open.filter(x => x.period === per).map(x => x.tx);
+      const text = Core.reminderText({ contact: d.contact, portal: BASE_URL ? BASE_URL + '/u/' + f.portal_token : '' }, list, per);
+      const u = q('SELECT email FROM users WHERE office_id = ? ORDER BY created LIMIT 1').get(f.office_id);
+      try { await sendMail({ to, subject: 'Липсващи документи за ' + Core.periodLabel(per), text, replyTo: u && u.email });
+        q('INSERT INTO autolog(office_id, firm_id, sent_at, count) VALUES(?,?,?,?)').run(f.office_id, f.id, now(), list.length); sent++; }
+      catch (e) { console.error(now(), 'автоматично напомняне до', to, 'не беше изпратено:', e.message); }
+    }
+  } finally { ticking = false; }
+  return sent;
+}
+setInterval(() => remindTick().catch(e => console.error(e)), REMIND.tick).unref();
 
 /* ---------- router ---------- */
 async function handle(req, res){
@@ -186,11 +228,21 @@ async function handle(req, res){
   if (m === 'GET' && STATIC[p]) return send(res, 200, fs.readFileSync(path.join(PUB, p)), { 'Content-Type': STATIC[p] + '; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
 
   /* client portal: no login, the secret link is the key */
-  if ((a = /^\/u\/([A-Za-z0-9_-]{20,64})(\/upload)?$/.exec(p))){
+  if ((a = /^\/u\/([A-Za-z0-9_-]{20,64})(\/upload|\/reply)?$/.exec(p))){
     const firm = q('SELECT * FROM firms WHERE portal_token = ?').get(a[1]);
     if (!firm) return html(res, '<!DOCTYPE html><meta charset="utf-8"><title>FinBridge</title><p style="font-family:sans-serif;padding:24px">Тази връзка не е валидна. Поискайте нова от счетоводителя си.</p>', 404);
     if (!a[2] && m === 'GET') return html(res, portalPage(firm));
-    if (a[2] && m === 'POST'){
+    if (a[2] === '/reply' && m === 'POST'){
+      limit('rp:' + a[1], 60, 3600000);
+      const b = await readJson(req), note = String(b.note || '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 300);
+      if (note.length < 2) bad(400, 'bad_note', 'Напишете с няколко думи какво е плащането.');
+      const hit = missingFor(firm.office_id, firm.id).find(x => x.period === b.period && x.tx.id === b.tx);
+      if (!hit) bad(404, 'no_tx', 'Това плащане вече не е в списъка.');
+      if (hit.replied) bad(409, 'exists', 'Вече сте изпратили обяснение за това плащане.');
+      q('INSERT INTO replies(id, office_id, firm_id, period, tx_id, note, status, created) VALUES(?,?,?,?,?,?,?,?)').run(rid(12), firm.office_id, firm.id, hit.period, hit.tx.id, note, 'new', now());
+      return send(res, 200, { ok: true });
+    }
+    if (a[2] === '/upload' && m === 'POST'){
       limit('up:' + a[1], 60, 3600000);
       const buf = await readBody(req, MAX_FILE);
       storeFile(firm.office_id, firm.id, url.searchParams.get('name'), buf, 'client', url.searchParams.get('note'));
@@ -204,6 +256,7 @@ async function handle(req, res){
     if (!user) return send(res, 302, '', { Location: '/login' });
     return html(res, page('index.html').replace('<script>\n/*CORE-START*/', '<script src="/shim.js"></script>\n<script>\n/*CORE-START*/'));
   }
+  if (m === 'GET' && p === '/reset') return html(res, page('login.html').replace('{{SIGNUP}}', 'hidden'));
   if (m === 'GET' && p === '/login') return user ? send(res, 302, '', { Location: '/' }) : html(res, page('login.html').replace('{{SIGNUP}}', ALLOW_SIGNUP ? '' : 'hidden'));
   if (!p.startsWith('/api/')) bad(404, 'not_found');
   if (m !== 'GET' && req.headers['x-fb'] !== '1') bad(403, 'csrf', 'Липсва защитният хедър.');
@@ -228,13 +281,70 @@ async function handle(req, res){
     if (!u || !checkPass(String(b.password || ''), u.pass)) bad(401, 'bad_login', 'Грешен имейл или парола.');
     return send(res, 200, { ok: true }, { 'Set-Cookie': startSession(req, res, u.id) });
   }
+  if (p === '/api/forgot' && m === 'POST'){
+    limit('forgot:' + ipOf(req), 5, 3600000);
+    const b = await readJson(req), u = q('SELECT id, email FROM users WHERE email = ?').get(String(b.email || '').trim().toLowerCase());
+    if (u && SMTP.host && SMTP.from){
+      const token = rid(32);
+      q('DELETE FROM resets WHERE user_id = ? OR expires < ?').run(u.id, Date.now());
+      q('INSERT INTO resets(token_hash, user_id, expires) VALUES(?,?,?)').run(sha(token), u.id, Date.now() + 3600000);
+      sendMail({ to: u.email, subject: 'Нова парола за FinBridge', text: 'Здравейте!\nЗа да зададете нова парола, отворете тази връзка до един час:\n' + origin(req) + '/reset#' + token + '\nАко не сте искали смяна, не правете нищо.' })
+        .catch(e => console.error(now(), 'имейл за нова парола не беше изпратен:', e.message));
+    }
+    return send(res, 200, { ok: true, mail: !!(SMTP.host && SMTP.from) });
+  }
+  if (p === '/api/reset' && m === 'POST'){
+    limit('reset:' + ipOf(req), 10, 3600000);
+    const b = await readJson(req), pass = String(b.password || ''), r = q('SELECT user_id FROM resets WHERE token_hash = ? AND expires > ?').get(sha(String(b.token || '')), Date.now());
+    if (!r) bad(400, 'bad_token', 'Връзката е невалидна или изтекла. Поискайте нова.');
+    if (pass.length < 10 || pass.length > 200) bad(400, 'weak_password', 'Паролата трябва да е поне 10 знака.');
+    q('UPDATE users SET pass = ? WHERE id = ?').run(hashPass(pass), r.user_id);
+    q('DELETE FROM sessions WHERE user_id = ?').run(r.user_id); q('DELETE FROM resets WHERE user_id = ?').run(r.user_id);
+    return send(res, 200, { ok: true });
+  }
   if (!user) bad(401, 'unauthorized', 'Влезте в акаунта си.');
   const O = user.office_id;
   if (p === '/api/logout' && m === 'POST'){
     q('DELETE FROM sessions WHERE token_hash = ?').run(sha(cookies(req).fb_s));
     return send(res, 200, { ok: true }, { 'Set-Cookie': 'fb_s=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0' });
   }
-  if (p === '/api/me') return send(res, 200, { office: user.office, email: user.email, ai: !!AI.key, mail: !!(SMTP.host && SMTP.from) });
+  if (p === '/api/me') return send(res, 200, { office: user.office, email: user.email, ai: !!AI.key, mail: !!(SMTP.host && SMTP.from), remindDays: REMIND.days });
+  if (p === '/api/users' && m === 'GET') return send(res, 200, q('SELECT id, email, created FROM users WHERE office_id = ? ORDER BY created').all(O).map(u => ({ id: u.id, email: u.email, created: u.created.slice(0, 10), me: u.id === user.id })));
+  if (p === '/api/users' && m === 'POST'){
+    limit('adduser:' + O, 20, 3600000);
+    const b = await readJson(req), email = String(b.email || '').trim().toLowerCase(), pass = String(b.password || '');
+    if (!EMAIL.test(email) || email.length > 200) bad(400, 'bad_email', 'Невалиден имейл.');
+    if (pass.length < 10 || pass.length > 200) bad(400, 'weak_password', 'Паролата трябва да е поне 10 знака.');
+    if (q('SELECT 1 FROM users WHERE email = ?').get(email)) bad(409, 'exists', 'Вече има акаунт с този имейл.');
+    if (q('SELECT COUNT(*) AS n FROM users WHERE office_id = ?').get(O).n >= 50) bad(400, 'too_many', 'Достигнат е лимитът от 50 души в екипа.');
+    q('INSERT INTO users(id, office_id, email, pass, created) VALUES(?,?,?,?,?)').run(rid(9), O, email, hashPass(pass), now());
+    return send(res, 200, { ok: true });
+  }
+  if ((a = /^\/api\/users\/([A-Za-z0-9_-]{6,40})$/.exec(p)) && m === 'DELETE'){
+    if (a[1] === user.id) bad(400, 'self', 'Не можете да премахнете собствения си достъп.');
+    if (!q('SELECT 1 FROM users WHERE id = ? AND office_id = ?').get(a[1], O)) bad(404, 'not_found');
+    q('DELETE FROM sessions WHERE user_id = ?').run(a[1]); q('DELETE FROM resets WHERE user_id = ?').run(a[1]); q('DELETE FROM users WHERE id = ?').run(a[1]);
+    return send(res, 200, { ok: true });
+  }
+  if (p === '/api/password' && m === 'POST'){
+    limit('pass:' + user.id, 10, 900000);
+    const b = await readJson(req), next = String(b.next || '');
+    if (!checkPass(String(b.old || ''), q('SELECT pass FROM users WHERE id = ?').get(user.id).pass)) bad(400, 'bad_password', 'Текущата парола не е вярна.');
+    if (next.length < 10 || next.length > 200) bad(400, 'weak_password', 'Новата парола трябва да е поне 10 знака.');
+    q('UPDATE users SET pass = ? WHERE id = ?').run(hashPass(next), user.id);
+    q('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(user.id, sha(cookies(req).fb_s));
+    return send(res, 200, { ok: true });
+  }
+  if (p === '/api/backup' && m === 'GET'){
+    const out = { exportedAt: now(), office: user.office, firms: q('SELECT id, data FROM firms WHERE office_id = ?').all(O).map(r => Object.assign({ id: r.id }, JSON.parse(r.data))),
+      periods: q('SELECT firm_id, period, data FROM periods WHERE office_id = ? ORDER BY firm_id, period').all(O).map(r => JSON.parse(r.data)) };
+    return send(res, 200, Buffer.from(JSON.stringify(out, null, 1)), { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename="finbridge-arhiv-' + now().slice(0, 10) + '.json"', 'Cache-Control': 'no-store' });
+  }
+  if (p === '/api/replies' && m === 'GET') return send(res, 200, q("SELECT id, firm_id AS firm, period, tx_id AS tx, note, created FROM replies WHERE office_id = ? AND status = 'new' ORDER BY created").all(O));
+  if ((a = /^\/api\/replies\/([A-Za-z0-9_-]{8,40})\/done$/.exec(p)) && m === 'POST'){
+    q("UPDATE replies SET status = 'done' WHERE id = ? AND office_id = ?").run(a[1], O); return send(res, 200, { ok: true });
+  }
+  if (p === '/api/remind-now' && m === 'POST' && REMIND.anytime) return send(res, 200, { sent: await remindTick() });
 
   if (p === '/api/firms' && m === 'GET') return send(res, 200, q('SELECT * FROM firms WHERE office_id = ?').all(O).map(r => firmOut(req, r)));
   if ((a = /^\/api\/firms\/([^/]+)(\/portal-reset)?$/.exec(p))){
@@ -244,7 +354,7 @@ async function handle(req, res){
     if (m === 'PUT'){
       const b = await readJson(req), d = b.data && typeof b.data === 'object' ? b.data : bad(400, 'bad_data');
       const s = (v, n) => String(v == null ? '' : v).trim().slice(0, n);
-      const data = JSON.stringify({ name: s(d.name, 160), eik: s(d.eik, 20), contact: s(d.contact, 120), channel: s(d.channel, 20), address: s(d.address, 200) });
+      const data = JSON.stringify({ name: s(d.name, 160), eik: s(d.eik, 20), contact: s(d.contact, 120), channel: s(d.channel, 20), address: s(d.address, 200), auto: d.auto === true });
       if (!JSON.parse(data).name) bad(400, 'bad_name', 'Липсва име на фирмата.');
       if (cur) q('UPDATE firms SET data = ? WHERE office_id = ? AND id = ?').run(data, O, id);
       else { if (q('SELECT COUNT(*) AS n FROM firms WHERE office_id = ?').get(O).n >= 2000) bad(400, 'too_many'); q('INSERT INTO firms(office_id, id, data, portal_token) VALUES(?,?,?,?)').run(O, id, data, rid(24)); }
@@ -254,6 +364,7 @@ async function handle(req, res){
       for (const f of q('SELECT id FROM files WHERE office_id = ? AND firm_id = ?').all(O, id)) fs.rmSync(path.join(DATA, 'files', f.id), { force: true });
       q('DELETE FROM files WHERE office_id = ? AND firm_id = ?').run(O, id);
       q('DELETE FROM periods WHERE office_id = ? AND firm_id = ?').run(O, id);
+      q('DELETE FROM replies WHERE office_id = ? AND firm_id = ?').run(O, id); q('DELETE FROM autolog WHERE office_id = ? AND firm_id = ?').run(O, id);
       q('DELETE FROM firms WHERE office_id = ? AND id = ?').run(O, id);
       return send(res, 200, { ok: true });
     }
