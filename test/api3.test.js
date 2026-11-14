@@ -33,6 +33,10 @@ const client=()=>{let cookie='';return async(method,url,body,o={})=>{const h={..
   assert.deepEqual((await Bc('GET','/api/questions')).body,[]);await Bc('POST','/api/questions/'+qid+'/close');assert.equal((await A('GET','/api/questions')).body.length,1);await A('POST','/api/questions/'+qid+'/close');assert.deepEqual((await A('GET','/api/questions')).body,[]);
   r=await A('GET','/api/backup');assert.deepEqual(r.body.questions.map(x=>[x.question,x.answer,x.status]),[['За кой обект е <бетонът>?','За склада в Девня','closed']]);
   ok('questions on a payment: e-mailed to the client with the link, answered once from the client page, visible only to the owning office, kept in the backup after closing');
+  assert.equal((await A('GET','/api/kv/rules')).body.exists,false);assert.equal((await A('PUT','/api/kv/rules',{data:{sup:{'507081376':{acc:'302',vatMode:'none',name:'Бетон'}},cp:{}}})).status,200);assert.equal((await A('GET','/api/kv/rules')).body.data.sup['507081376'].acc,'302');
+  assert.equal((await Bc('GET','/api/kv/rules')).body.exists,false);assert.equal((await A('PUT','/api/kv/BAD-key',{data:{}})).status,404);assert.equal((await A('GET','/api/backup')).body.rules.sup['507081376'].acc,'302');
+  r=await A('GET','/api/period/f1/2026-09');await A('PUT','/api/period/f1/2026-09',{data:{...r.body.data,closed:'2026-10-15'}});r=await anon('GET',tok);assert(r.body.includes('няма плащания, за които да липсва документ')&&!r.body.includes('class="forpay"'));
+  ok('office rules are stored per office and included in the backup; a month marked closed no longer asks the client for documents');
   console.log('API3: all '+n+' checks passed');
   }finally{srv.stop();smtp.close()}
 })().catch(e=>{console.error('API3 FAIL after step '+n+':',(e.message||'').slice(0,900));process.exit(1)});

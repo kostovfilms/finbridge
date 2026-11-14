@@ -27,7 +27,7 @@
   const loadPeriods = async per => snapList((await api('GET', '/api/periods?period=' + per)).map(x => snapDoc(x.firm + '_' + per, x.data)));
   function docRef(p){
     const [coll, id] = p.split('/');
-    const url = coll === 'firms' ? '/api/firms/' + id : '/api/period/' + split(id).join('/');
+    const url = coll === 'firms' ? '/api/firms/' + id : coll === 'settings' ? '/api/kv/' + id : '/api/period/' + split(id).join('/');
     return { id, path: p,
       async get(){ if (coll === 'firms') throw { code: 'invalid_argument' }; const r = await api('GET', url); return snapDoc(id, r.exists ? r.data : undefined); },
       async set(data){ await api('PUT', url, { data }); refresh(); },

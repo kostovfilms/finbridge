@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS resets(token_hash TEXT PRIMARY KEY, user_id TEXT NOT 
 `);
 for (const sql of ["ALTER TABLE files ADD COLUMN kind TEXT NOT NULL DEFAULT 'invoice'", "ALTER TABLE files ADD COLUMN tx_hint TEXT NOT NULL DEFAULT ''", "ALTER TABLE files ADD COLUMN period_hint TEXT NOT NULL DEFAULT ''"]){ try { db.exec(sql); } catch (e) { /* колоната вече съществува */ } }
 db.exec("CREATE TABLE IF NOT EXISTS questions(id TEXT PRIMARY KEY, office_id TEXT NOT NULL, firm_id TEXT NOT NULL, period TEXT NOT NULL, tx_id TEXT NOT NULL, question TEXT NOT NULL, answer TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, asked TEXT NOT NULL, answered TEXT NOT NULL DEFAULT '')");
+db.exec('CREATE TABLE IF NOT EXISTS kv(office_id TEXT NOT NULL, key TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(office_id, key))');
 const q = sql => db.prepare(sql);
 const now = () => new Date().toISOString();
 const rid = n => crypto.randomBytes(n).toString('base64url');
@@ -127,6 +128,7 @@ function missingFor(officeId, firmId, beforePeriod){
   for (const r of q('SELECT period, data FROM periods WHERE office_id = ? AND firm_id = ? ORDER BY period DESC LIMIT 3').all(officeId, firmId)){
     if (beforePeriod && r.period >= beforePeriod) continue;
     let p; try { p = JSON.parse(r.data); } catch (e) { continue; }
+    if (p.closed) continue;
     for (const t of p.txs || []) if (t.needsDoc && !t.docId && t.amount < 0) out.push({ period: r.period, tx: t, replied: pending.has(r.period + '/' + t.id) });
   }
   return out.sort((a, b) => String(a.tx.date).localeCompare(String(b.tx.date)));
@@ -383,6 +385,7 @@ async function handle(req, res){
   if (p === '/api/backup' && m === 'GET'){
     const out = { exportedAt: now(), office: user.office, firms: q('SELECT id, data FROM firms WHERE office_id = ?').all(O).map(r => Object.assign({ id: r.id }, JSON.parse(r.data))),
       periods: q('SELECT firm_id, period, data FROM periods WHERE office_id = ? ORDER BY firm_id, period').all(O).map(r => JSON.parse(r.data)),
+      rules: (r => r ? JSON.parse(r.data) : {})(q("SELECT data FROM kv WHERE office_id = ? AND key = 'rules'").get(O)),
       questions: q('SELECT firm_id AS firm, period, tx_id AS tx, question, answer, status, asked, answered FROM questions WHERE office_id = ? ORDER BY asked').all(O) };
     return send(res, 200, Buffer.from(JSON.stringify(out, null, 1)), { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename="finbridge-arhiv-' + now().slice(0, 10) + '.json"', 'Cache-Control': 'no-store' });
   }
@@ -449,6 +452,11 @@ async function handle(req, res){
       return send(res, 200, { version: v });
     }
     if (m === 'DELETE'){ q('DELETE FROM periods WHERE office_id = ? AND firm_id = ? AND period = ?').run(O, firm, per); return send(res, 200, { ok: true }); }
+  }
+  if ((a = /^\/api\/kv\/([a-z]{1,20})$/.exec(p))){
+    if (m === 'GET'){ const r = q('SELECT data FROM kv WHERE office_id = ? AND key = ?').get(O, a[1]); return send(res, 200, r ? { exists: true, data: JSON.parse(r.data) } : { exists: false }); }
+    if (m === 'PUT'){ const b = await readJson(req); if (!b.data || typeof b.data !== 'object') bad(400, 'bad_data');
+      q('INSERT INTO kv(office_id, key, data) VALUES(?,?,?) ON CONFLICT(office_id, key) DO UPDATE SET data = excluded.data').run(O, a[1], JSON.stringify(b.data)); return send(res, 200, { ok: true }); }
   }
   if (p === '/api/inbox' && m === 'GET') return send(res, 200, q("SELECT id, firm_id AS firm, name, mime, size, note, created, kind, tx_hint AS tx, period_hint AS period FROM files WHERE office_id = ? AND status = 'new' ORDER BY created").all(O));
   if (p === '/api/files' && m === 'POST'){
