@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FinBridge Финанси</title>
+<style>
+:root{--bg:#f1f4f5;--surface:#fff;--surface-2:#e8edee;--line:#d3dbdd;--ink:#16252a;--muted:#5b6d73;--accent:#0e6b74;--accent-ink:#fff;--accent-soft:#d9eef0;--good:#1d7a46;--good-soft:#dcf1e4;--warn:#9a5b00;--warn-soft:#fbecd0;--crit:#b3261e;--crit-soft:#fbe0de}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#0f1719;--surface:#172124;--surface-2:#1f2c30;--line:#2f4045;--ink:#e4ecee;--muted:#93a6ab;--accent:#4fc0c9;--accent-ink:#06262a;--accent-soft:#123a3f;--good:#6fd39a;--good-soft:#15382a;--warn:#f0b65a;--warn-soft:#40300f;--crit:#ff8f87;--crit-soft:#4a1c19}}
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:400 15px/1.45 "Segoe UI",Arial,sans-serif}
+button,select,input,textarea{font:inherit;color:inherit}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.app{display:grid;grid-template-columns:220px minmax(0,1fr);min-height:100%}
+.rail{background:var(--surface);border-right:1px solid var(--line);padding:20px 14px;display:flex;flex-direction:column;gap:16px;min-width:0}
+.brand{font-weight:800;font-size:19px;padding:0 8px}.brand span{color:var(--accent)}.brand small{display:block;font-weight:400;font-size:12.5px;color:var(--muted);margin-top:4px;overflow-wrap:anywhere}
+.nav{display:flex;flex-direction:column;gap:4px}
+.nav a{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:9px 10px;border-radius:8px;color:var(--ink);text-decoration:none;font-weight:500;white-space:nowrap}
+.nav a:hover{background:var(--surface-2)}.nav a.on{background:var(--accent-soft);color:var(--accent)}
+.count{font-size:12px;background:var(--crit-soft);color:var(--crit);border-radius:10px;padding:1px 7px}
+.foot{margin-top:auto;font-size:12.5px;color:var(--muted);padding:0 8px;display:flex;flex-direction:column;gap:6px;overflow-wrap:anywhere}
+.main{padding:22px 28px 48px;min-width:0;display:flex;flex-direction:column;gap:16px}
+h1{font-size:23px;line-height:1.2;margin:0}h2{font-size:16px;margin:0 0 10px}
+.head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px;min-width:0}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+.tile b{display:block;font-size:22px;font-variant-numeric:tabular-nums;margin-top:2px}.tile span{color:var(--muted);font-size:13px}.tile small{color:var(--muted)}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+.btn{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:8px 12px;font-weight:600;cursor:pointer;text-decoration:none;color:var(--ink);display:inline-block}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}.btn.small{padding:4px 9px;font-size:13px;font-weight:500}.btn.bad{color:var(--crit)}.btn:disabled{opacity:.5;cursor:default}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px 8px;border-bottom:1px solid var(--line);vertical-align:top}th{font-size:12.5px;color:var(--muted);font-weight:600}
+.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.scroll{overflow-x:auto}
+.pill{display:inline-block;border-radius:10px;padding:1px 8px;font-size:12.5px;background:var(--surface-2);color:var(--muted);white-space:nowrap}
+.pill.good{background:var(--good-soft);color:var(--good)}.pill.warn{background:var(--warn-soft);color:var(--warn)}.pill.crit{background:var(--crit-soft);color:var(--crit)}.pill.info{background:var(--accent-soft);color:var(--accent)}
+.dim{color:var(--muted);font-size:13px}.acts{display:flex;gap:6px;flex-wrap:wrap}
+.form{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
+.form label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted)}.form .full{grid-column:1/-1}
+input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px 10px;background:var(--surface);min-width:0;width:100%}
+.note{border-radius:8px;padding:10px 12px;font-size:14px}.note.info{background:var(--accent-soft)}.note.warn{background:var(--warn-soft);color:var(--warn)}.note.crit{background:var(--crit-soft);color:var(--crit)}.note.good{background:var(--good-soft);color:var(--good)}
+.bar{height:8px;background:var(--surface-2);border-radius:4px;overflow:hidden;margin-top:4px}.bar i{display:block;height:100%;background:var(--accent)}.bar i.over{background:var(--crit)}.bar i.near{background:var(--warn)}
+.filters{display:flex;gap:8px;flex-wrap:wrap}.filters select,.filters input{width:auto}
+.empty{color:var(--muted);padding:18px 0;text-align:center}
+@media (max-width:760px){.app{grid-template-columns:1fr}.rail{border-right:0;border-bottom:1px solid var(--line);padding:12px;gap:10px}.nav{flex-direction:row;overflow-x:auto}.foot{flex-direction:row;flex-wrap:wrap;gap:10px;margin:0}.main{padding:16px 12px 40px}}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <div class="brand">Fin<span>Bridge</span> Финанси<small id="firm"></small></div>
+    <nav class="nav" id="nav" aria-label="Раздели"></nav>
+    <div class="foot" id="foot"></div>
+  </aside>
+  <main class="main" id="main" aria-live="polite"><p class="dim">Зареждане…</p></main>
+</div>
+<script>
+/*FIN-START*/
+const Fin = (() => {
+  'use strict';
+  const CATS = ['Гориво и транспорт', 'Материали и стоки', 'Външни услуги', 'Наем и режийни', 'Командировки', 'Реклама', 'Софтуер и абонаменти', 'Заплати и осигуровки', 'Данъци и такси', 'Други'];
+  const DEFAULTS = { balance: 0, balanceDate: '', approverLimit: 0, receiptOver: 0, cats: CATS };
+  const PAY = { own: 'Лични средства', card: 'Фирмена карта', cash: 'Каса', bank: 'Банков превод' };
+  const STATUS = { submitted: 'Чака одобрение', approved: 'Одобрен', rejected: 'Отказан', paid: 'Платен', open: 'Неплатена', void: 'Анулирана', active: 'Активен' };
+  const ROLES = { owner: 'Собственик', approver: 'Одобряващ', member: 'Служител', accountant: 'Счетоводител' };
+  const r2 = n => Math.round(n * 100) / 100;
+  const addDays = (d, n) => { const t = new Date(d + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
+  const dayDiff = (a, b) => Math.round((Date.parse(a + 'T00:00:00Z') - Date.parse(b + 'T00:00:00Z')) / 864e5);
+  const money = n => (n < 0 ? '-' : '') + Math.abs(+n || 0).toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  const spend = i => i.type === 'expense' || i.type === 'bill';
+  const counted = i => i.status === 'approved' || i.status === 'paid';
+
+  /* Кой може да одобри или откаже заявка. */
+  function canApprove(item, actor, set){
+    if (actor.role === 'owner') return { ok: true };
+    if (actor.role !== 'approver') return { ok: false, why: 'Само одобряващ или собственик може да решава заявки.' };
+    if (item.owner === actor.id) return { ok: false, why: 'Не можете да решавате собствените си заявки.' };
+    if (set.approverLimit > 0 && item.amount > set.approverLimit) return { ok: false, why: 'Сумата е над лимита ви за одобрение. Нужен е собственик.' };
+    return { ok: true };
+  }
+  /* Бюджет важи за записите, изрично отнесени към него, а ако има категория и за неотнесените от същата категория. */
+  const inBudget = (b, i) => spend(i) && (i.budget === b.id || (!i.budget && b.cat && i.cat === b.cat));
+  function budgetUsage(items, period){
+    return items.filter(b => b.type === 'budget').map(b => {
+      const own = items.filter(i => inBudget(b, i) && String(i.date).slice(0, 7) === period);
+      const spent = r2(own.filter(counted).reduce((s, i) => s + i.amount, 0)), pending = r2(own.filter(i => i.status === 'submitted').reduce((s, i) => s + i.amount, 0));
+      return { id: b.id, name: b.name, cat: b.cat, limit: b.limit, spent, pending, left: r2(b.limit - spent), pct: b.limit ? Math.round(spent / b.limit * 100) : 0 };
+    });
+  }
+  /* Предупреждения по правилата на фирмата за един разход или фактура. */
+  function violations(item, items, set, today){
+    const out = [];
+    if (!spend(item)) return out;
+    if (item.type === 'expense' && !item.file && item.amount > (+set.receiptOver || 0)) out.push('няма документ');
+    if (today && item.date > today) out.push('бъдеща дата');
+    if (items.some(o => o.id !== item.id && o.type === item.type && o.status !== 'rejected' && o.date === item.date && o.amount === item.amount && String(o.party).toLowerCase() === String(item.party).toLowerCase())) out.push('възможен дубликат');
+    for (const b of items) if (b.type === 'budget' && inBudget(b, item)){
+      const used = items.filter(i => i.id !== item.id && inBudget(b, i) && counted(i) && String(i.date).slice(0, 7) === String(item.date).slice(0, 7)).reduce((s, i) => s + i.amount, 0);
+      if (r2(used + item.amount) > b.limit) out.push('над бюджета „' + b.name + '“');
+    }
+    return out;
+  }
+  /* Прогноза за наличността по седмици: вземания по падеж минус задължения по падеж; просрочените влизат в първата седмица. */
+  function forecast(items, set, today, weeks){
+    let bal = +set.balance || 0; const out = [];
+    const due = i => i.due || i.date;
+    for (let w = 0; w < (weeks || 8); w++){
+      const start = addDays(today, 7 * w), end = addDays(start, 6), hit = i => (due(i) >= start && due(i) <= end) || (w === 0 && due(i) < start);
+      const inc = items.filter(i => i.type === 'invoice' && i.status === 'open' && hit(i)).reduce((s, i) => s + i.amount, 0);
+      let exp = items.filter(i => i.type === 'bill' && (i.status === 'submitted' || i.status === 'approved') && hit(i)).reduce((s, i) => s + i.amount, 0);
+      if (w === 0) exp += items.filter(i => i.type === 'expense' && i.pay === 'own' && i.status === 'approved').reduce((s, i) => s + i.amount, 0);
+      bal = r2(bal + inc - exp); out.push({ start, end, in: r2(inc), out: r2(exp), balance: bal });
+    }
+    return out;
+  }
+  /* Вземания по давност на просрочието. */
+  function aging(items, today){
+    const a = { notDue: 0, d30: 0, d60: 0, older: 0, total: 0, overdue: [] };
+    for (const i of items) if (i.type === 'invoice' && i.status === 'open'){
+      const late = dayDiff(today, i.due || i.date); a.total += i.amount;
+      if (late <= 0) a.notDue += i.amount; else { a[late <= 30 ? 'd30' : late <= 60 ? 'd60' : 'older'] += i.amount; a.overdue.push(Object.assign({ late }, i)); }
+    }
+    for (const k of ['notDue', 'd30', 'd60', 'older', 'total']) a[k] = r2(a[k]);
+    a.overdue.sort((x, y) => y.late - x.late); return a;
+  }
+  function byCat(items, period){
+    const m = {}; for (const i of items) if (spend(i) && counted(i) && String(i.date).slice(0, 7) === period) m[i.cat || 'Без категория'] = r2((m[i.cat || 'Без категория'] || 0) + i.amount);
+    return Object.entries(m).sort((a, b) => b[1] - a[1]).map(([cat, sum]) => ({ cat, sum }));
+  }
+  function summary(items){
+    const sum = f => r2(items.filter(f).reduce((s, i) => s + i.amount, 0)), n = f => items.filter(f).length;
+    const wait = i => spend(i) && i.status === 'submitted', pay = i => (i.type === 'bill' && i.status === 'approved') || (i.type === 'expense' && i.pay === 'own' && i.status === 'approved');
+    return { waitN: n(wait), waitSum: sum(wait), payN: n(pay), paySum: sum(pay), recvSum: sum(i => i.type === 'invoice' && i.status === 'open') };
+  }
+  function toCsv(rows){ return '﻿' + rows.map(r => r.map(c => { const s = String(c == null ? '' : c); return /[";\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(';')).join('\r\n'); }
+  return { CATS, DEFAULTS, PAY, STATUS, ROLES, r2, addDays, dayDiff, money, canApprove, budgetUsage, violations, forecast, aging, byCat, summary, toCsv };
+})();
+/*FIN-END*/
+
+(() => {
+'use strict';
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+const firmParam = new URLSearchParams(location.search).get('firm') || '';
+const withFirm = u => firmParam ? u + (u.includes('?') ? '&' : '?') + 'firm=' + encodeURIComponent(firmParam) : u;
+async function api(method, url, body, raw){
+  const opt = { method, headers: { 'x-fb': '1' }, credentials: 'same-origin' };
+  if (body !== undefined){ if (raw) opt.body = body; else { opt.body = JSON.stringify(body); opt.headers['content-type'] = 'application/json'; } }
+  let r; try { r = await fetch(withFirm(url), opt); } catch (e) { throw new Error('Няма връзка със сървъра.'); }
+  if (r.status === 401){ location.href = '/login'; throw new Error('Сесията изтече.'); }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.message || 'Грешка ' + r.status);
+  return j;
+}
+const S = { view: 'dash', st: null, form: null, msg: null, filter: { status: '', q: '' }, users: null, busy: false };
+const dm = d => d ? d.slice(8, 10) + '.' + d.slice(5, 7) + '.' + d.slice(0, 4) : '';
+const m = n => Fin.money(n) + ' ' + S.st.cur;
+const role = () => S.st.me.role;
+const VIEWS = [['dash', 'Табло', r => r !== 'member'], ['expense', 'Разходи', () => true], ['bill', 'Плащания', r => r !== 'member'], ['invoice', 'Вземания', r => r !== 'member'], ['budget', 'Бюджети', r => r !== 'member'], ['team', 'Екип и правила', r => r === 'owner']];
+const T = {
+  expense: { title: 'Разходи', add: 'Нов разход', party: 'Търговец', lead: 'Разходи на служителите: всеки качва бележката, одобреният документ отива при счетоводителя.' },
+  bill: { title: 'Плащания към доставчици', add: 'Нова фактура за плащане', party: 'Доставчик', lead: 'Фактури от доставчици с падеж: одобрение, после плащане.' },
+  invoice: { title: 'Вземания от клиенти', add: 'Нова издадена фактура', party: 'Клиент', lead: 'Издадени фактури и кой закъснява с плащането.' }
+};
+const PILL = { submitted: 'warn', approved: 'info', rejected: 'crit', paid: 'good', open: 'warn', void: '' };
+
+async function load(){ S.st = await api('GET', '/api/fin/state'); if (role() === 'member' && S.view === 'dash') S.view = 'expense'; }
+async function act(fn, okText){
+  if (S.busy) return; S.busy = true; S.msg = null;
+  try { await fn(); await load(); if (okText) S.msg = { cls: 'good', text: okText }; } catch (e) { S.msg = { cls: 'crit', text: e.message }; }
+  S.busy = false; render();
+}
+const items = t => S.st.items.filter(i => i.type === t);
+const period = () => S.st.today.slice(0, 7);
+
+function pills(i){
+  const v = Fin.violations(i, S.st.items, S.st.settings, S.st.today);
+  let late = '';
+  if ((i.type === 'invoice' && i.status === 'open') || (i.type === 'bill' && (i.status === 'submitted' || i.status === 'approved'))){ const d = Fin.dayDiff(S.st.today, i.due || i.date); if (d > 0) late = ' <span class="pill crit">просрочена с ' + d + (d === 1 ? ' ден' : ' дни') + '</span>'; }
+  return '<span class="pill ' + PILL[i.status] + '">' + Fin.STATUS[i.status] + '</span>' + late + (i.status === 'submitted' || i.status === 'approved' ? v.map(x => ' <span class="pill warn">' + esc(x) + '</span>').join('') : '');
+}
+function rowActs(i){
+  const r = role(), mine = i.owner === S.st.me.id, locked = i.status === 'paid' || i.status === 'void', b = (a, t, c) => '<button class="btn small ' + (c || '') + '" type="button" data-act="' + a + '" data-id="' + i.id + '">' + t + '</button>';
+  let h = '';
+  if (i.file) h += '<a class="btn small" target="_blank" rel="noopener" href="' + esc(withFirm('/api/fin/items/' + i.id + '/file')) + '">Документ</a>';
+  if (i.type === 'invoice'){
+    if (i.status === 'open') h += b('paid', 'Получено плащане', 'pri') + b('void', 'Анулирай');
+    else h += b('reopen-inv', 'Върни като неплатена');
+  } else {
+    if (i.status === 'submitted' && Fin.canApprove(i, S.st.me, S.st.settings).ok) h += b('approve', 'Одобри', 'pri') + b('reject', 'Откажи', 'bad');
+    if (i.status === 'approved' && r !== 'member') h += b('paid', i.type === 'expense' ? (i.pay === 'own' ? 'Възстановено' : 'Приключи') : 'Платено', 'pri');
+    if (i.status !== 'submitted' && (r === 'owner' || (i.status === 'rejected' && mine))) h += b('resubmit', 'Върни за одобрение');
+  }
+  const canEdit = !locked && (r === 'owner' || (mine && (i.status === 'submitted' || i.status === 'rejected')) || (r === 'approver' && i.type !== 'expense'));
+  if (canEdit) h += b('edit', 'Редактирай') + b('del', S.confirm === i.id ? 'Потвърди изтриването' : 'Изтрий', 'bad');
+  return '<div class="acts">' + h + '</div>';
+}
+function itemForm(type, d){
+  d = d || {}; const t = T[type], set = S.st.settings, buds = items('budget');
+  const sel = (name, opts, val, empty) => '<select name="' + name + '">' + (empty != null ? '<option value="">' + empty + '</option>' : '') + opts.map(o => '<option value="' + esc(o[0]) + '"' + (o[0] === val ? ' selected' : '') + '>' + esc(o[1]) + '</option>').join('') + '</select>';
+  const cats = set.cats.includes(d.cat) || !d.cat ? set.cats : set.cats.concat(d.cat);
+  return '<form class="card form" id="item-form" data-type="' + type + '" data-id="' + esc(d.id || '') + '" novalidate><h2 class="full">' + (d.id ? 'Редакция' : t.add) + '</h2>' +
+    '<label>' + t.party + '<input name="party" maxlength="120" value="' + esc(d.party || '') + '" required></label>' +
+    (type !== 'expense' ? '<label>Номер на фактурата<input name="number" maxlength="40" value="' + esc(d.number || '') + '"></label>' : '') +
+    '<label>Дата<input name="date" type="date" value="' + esc(d.date || S.st.today) + '" required></label>' +
+    (type !== 'expense' ? '<label>Падеж<input name="due" type="date" value="' + esc(d.due || '') + '"></label>' : '') +
+    '<label>Сума с ДДС (' + S.st.cur + ')<input name="amount" inputmode="decimal" value="' + (d.amount ? String(d.amount).replace('.', ',') : '') + '" required></label>' +
+    (type !== 'invoice' ? '<label>Категория' + sel('cat', cats.map(c => [c, c]), d.cat || '', 'Без категория') + '</label>' +
+      (buds.length ? '<label>Бюджет' + sel('budget', buds.map(b => [b.id, b.name]), d.budget || '', 'По категория') + '</label>' : '') : '') +
+    (type === 'expense' ? '<label>Платено с' + sel('pay', Object.entries(Fin.PAY), d.pay || 'own') + '</label>' : '') +
+    '<label class="full">Бележка<input name="note" maxlength="300" value="' + esc(d.note || '') + '"></label>' +
+    '<label class="full">' + (d.file ? 'Замени документа (' + esc(d.file.name) + ')' : 'Документ: снимка или PDF') + '<input name="file" type="file" accept="image/*,application/pdf"></label>' +
+    '<div class="full acts"><button class="btn pri" type="submit">' + (d.id ? 'Запази' : 'Добави') + '</button><button class="btn" type="button" data-act="cancel">Отказ</button></div></form>';
+}
+function vList(type){
+  const t = T[type], f = S.filter, all = items(type);
+  const list = all.filter(i => (!f.status || i.status === f.status) && (!f.q || (i.party + ' ' + (i.number || '') + ' ' + (i.note || '') + ' ' + (i.by || '')).toLowerCase().includes(f.q.toLowerCase())));
+  const sts = type === 'invoice' ? ['open', 'paid', 'void'] : ['submitted', 'approved', 'rejected', 'paid'];
+  const total = Fin.r2(list.reduce((s, i) => s + i.amount, 0));
+  let h = '<div class="head"><div><h1>' + t.title + '</h1><div class="dim">' + t.lead + '</div></div><div class="acts"><button class="btn" type="button" data-act="csv" data-type="' + type + '"' + (all.length ? '' : ' disabled') + '>Изтегли CSV</button><button class="btn pri" type="button" data-act="new" data-type="' + type + '">' + t.add + '</button></div></div>';
+  if (S.form && S.form.type === type) h += itemForm(type, S.form.data);
+  if (S.reject) h += '<form class="card form" id="reject-form" data-id="' + S.reject + '"><label class="full">Причина за отказа<input name="note" maxlength="300" required></label><div class="full acts"><button class="btn pri" type="submit">Откажи заявката</button><button class="btn" type="button" data-act="cancel">Назад</button></div></form>';
+  h += '<div class="filters"><select id="f-status" aria-label="Състояние"><option value="">Всички състояния</option>' + sts.map(s => '<option value="' + s + '"' + (f.status === s ? ' selected' : '') + '>' + Fin.STATUS[s] + '</option>').join('') + '</select><input id="f-q" type="search" placeholder="Търсене" aria-label="Търсене" value="' + esc(f.q) + '"></div>';
+  h += '<div class="card scroll">' + (list.length ? '<table><thead><tr><th>Дата</th><th>' + t.party + '</th>' + (type !== 'invoice' ? '<th>Категория</th>' : '') + (type !== 'expense' ? '<th>Падеж</th>' : '<th>Подал</th>') + '<th class="num">Сума</th><th>Състояние</th><th></th></tr></thead><tbody>' +
+    list.map(i => { const last = i.log.length ? i.log[i.log.length - 1] : null;
+      return '<tr><td>' + dm(i.date) + '</td><td>' + esc(i.party) + (i.number ? ' <span class="dim">№ ' + esc(i.number) + '</span>' : '') + (i.note ? '<div class="dim">' + esc(i.note) + '</div>' : '') + '</td>' + (type !== 'invoice' ? '<td>' + esc(i.cat || '') + (type === 'expense' ? '<div class="dim">' + esc(Fin.PAY[i.pay] || '') + '</div>' : '') + '</td>' : '') +
+        '<td>' + (type !== 'expense' ? dm(i.due) : esc(i.by || '')) + '</td><td class="num">' + m(i.amount) + '</td><td>' + pills(i) + (i.status === 'rejected' && last && last.note ? '<div class="dim">Причина: ' + esc(last.note) + '</div>' : '') + (i.status === 'paid' && i.paidAt ? '<div class="dim">на ' + dm(i.paidAt) + '</div>' : '') + '</td><td>' + rowActs(i) + '</td></tr>'; }).join('') +
+    '</tbody><tfoot><tr><td colspan="' + (type === 'invoice' ? 3 : 4) + '" class="dim">' + list.length + (list.length === 1 ? ' запис' : ' записа') + '</td><td class="num"><b>' + m(total) + '</b></td><td colspan="2"></td></tr></tfoot></table>' : '<div class="empty">' + (all.length ? 'Няма записи по този филтър.' : 'Още няма записи.') + '</div>') + '</div>';
+  return h;
+}
+function budgetBars(){
+  const u = Fin.budgetUsage(S.st.items, period());
+  return u.length ? u.map(b => '<div style="margin-bottom:12px"><div class="head"><b>' + esc(b.name) + '</b><span class="num">' + m(b.spent) + ' от ' + m(b.limit) + '</span></div><div class="bar"><i class="' + (b.pct > 100 ? 'over' : b.pct >= 80 ? 'near' : '') + '" style="width:' + Math.min(100, b.pct) + '%"></i></div><div class="dim">' + (b.left >= 0 ? 'остават ' + m(b.left) : 'превишен с ' + m(-b.left)) + (b.pending ? ' · чакат одобрение ' + m(b.pending) : '') + (b.cat ? ' · ' + esc(b.cat) : '') + '</div></div>').join('') : '<div class="empty">Няма зададени бюджети.</div>';
+}
+function vDash(){
+  const st = S.st, s = Fin.summary(st.items), ag = Fin.aging(st.items, st.today), fc = Fin.forecast(st.items, st.settings, st.today, 8), cats = Fin.byCat(st.items, period());
+  const low = fc.find(w => w.balance < 0), max = Math.max(1, ...fc.map(w => Math.abs(w.balance)));
+  let h = '<div class="head"><h1>Табло</h1><div class="acts"><button class="btn pri" type="button" data-act="new" data-type="expense">Нов разход</button></div></div>';
+  h += '<div class="tiles"><div class="card tile"><span>Наличност</span><b>' + m(st.settings.balance) + '</b><small>' + (st.settings.balanceDate ? 'към ' + dm(st.settings.balanceDate) : 'не е въведена') + '</small></div>' +
+    '<div class="card tile"><span>Чакат одобрение</span><b>' + s.waitN + '</b><small>' + m(s.waitSum) + '</small></div><div class="card tile"><span>За плащане</span><b>' + m(s.paySum) + '</b><small>' + s.payN + ' одобрени</small></div>' +
+    '<div class="card tile"><span>Вземания</span><b>' + m(s.recvSum) + '</b><small>' + (ag.overdue.length ? 'просрочени ' + m(Fin.r2(ag.d30 + ag.d60 + ag.older)) : 'няма просрочени') + '</small></div></div>';
+  if (low) h += '<div class="note crit">По текущите падежи наличността става отрицателна в седмицата от ' + dm(low.start) + ' (' + m(low.balance) + ').</div>';
+  if (st.missing) h += '<div class="note warn">Счетоводителят чака документи за ' + st.missing + (st.missing === 1 ? ' банково плащане' : ' банкови плащания') + '. <a href="' + esc(st.portal) + '" target="_blank" rel="noopener">Качете ги тук</a>.</div>';
+  h += '<div class="cols"><section class="card scroll" style="grid-column:1/-1"><h2>Прогноза за 8 седмици</h2><table><thead><tr><th>Седмица от</th><th class="num">Постъпления</th><th class="num">Плащания</th><th class="num">Наличност</th><th></th></tr></thead><tbody>' +
+    fc.map(w => '<tr><td>' + dm(w.start).slice(0, 5) + '</td><td class="num">' + (w.in ? Fin.money(w.in) : '') + '</td><td class="num">' + (w.out ? Fin.money(w.out) : '') + '</td><td class="num"><b>' + Fin.money(w.balance) + '</b></td><td style="width:30%"><div class="bar"><i class="' + (w.balance < 0 ? 'over' : '') + '" style="width:' + Math.round(Math.abs(w.balance) / max * 100) + '%"></i></div></td></tr>').join('') + '</tbody></table><p class="dim">Сметката стъпва на въведената наличност, неплатените вземания и задължения по падеж и одобрените разходи за възстановяване.</p></section>';
+  h += '<section class="card"><h2>Бюджети за месеца</h2>' + budgetBars() + '</section>';
+  h += '<section class="card scroll"><h2>Просрочени вземания</h2>' + (ag.overdue.length ? '<table><tbody>' + ag.overdue.slice(0, 8).map(i => '<tr><td>' + esc(i.party) + (i.number ? ' <span class="dim">№ ' + esc(i.number) + '</span>' : '') + '</td><td class="num">' + m(i.amount) + '</td><td><span class="pill crit">' + i.late + (i.late === 1 ? ' ден' : ' дни') + '</span></td></tr>').join('') + '</tbody></table><p class="dim">До 30 дни: ' + m(ag.d30) + ' · 31 до 60: ' + m(ag.d60) + ' · над 60: ' + m(ag.older) + '</p>' : '<div class="empty">Няма просрочени вземания.</div>') + '</section>';
+  h += '<section class="card scroll"><h2>Разходи по категории за месеца</h2>' + (cats.length ? '<table><tbody>' + cats.map(c => '<tr><td>' + esc(c.cat) + '</td><td class="num">' + m(c.sum) + '</td></tr>').join('') + '</tbody></table>' : '<div class="empty">Няма одобрени разходи този месец.</div>') + '</section>';
+  if (st.bank && st.bank.length) h += '<section class="card scroll"><h2>Банкови движения от счетоводството</h2><table><thead><tr><th>Месец</th><th class="num">Постъпления</th><th class="num">Плащания</th><th class="num">Разлика</th></tr></thead><tbody>' + st.bank.map(b => '<tr><td>' + esc(b.label) + '</td><td class="num">' + Fin.money(b.in) + '</td><td class="num">' + Fin.money(b.out) + '</td><td class="num">' + Fin.money(Fin.r2(b.in - b.out)) + '</td></tr>').join('') + '</tbody></table></section>';
+  return h + '</div>' + (S.form && S.form.type === 'expense' ? itemForm('expense', S.form.data) : '');
+}
+function vBudget(){
+  const own = role() === 'owner', set = S.st.settings;
+  let h = '<div class="head"><div><h1>Бюджети</h1><div class="dim">Месечен лимит по категория или по проект. Разходите се отнасят към бюджета по категория или изрично.</div></div>' + (own ? '<button class="btn pri" type="button" data-act="new" data-type="budget">Нов бюджет</button>' : '') + '</div>';
+  if (S.form && S.form.type === 'budget'){ const d = S.form.data || {};
+    h += '<form class="card form" id="budget-form" data-id="' + esc(d.id || '') + '" novalidate><label>Име<input name="name" maxlength="80" value="' + esc(d.name || '') + '" required></label><label>Категория<select name="cat"><option value="">Само изрично отнесени</option>' + set.cats.map(c => '<option' + (c === d.cat ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</select></label><label>Месечен лимит (' + S.st.cur + ')<input name="limit" inputmode="decimal" value="' + (d.limit ? String(d.limit).replace('.', ',') : '') + '" required></label><div class="full acts"><button class="btn pri" type="submit">Запази</button><button class="btn" type="button" data-act="cancel">Отказ</button></div></form>'; }
+  h += '<section class="card"><h2>Изпълнение за текущия месец</h2>' + budgetBars() + '</section>';
+  if (own && items('budget').length) h += '<section class="card scroll"><table><thead><tr><th>Бюджет</th><th>Категория</th><th class="num">Лимит</th><th></th></tr></thead><tbody>' + items('budget').map(b => '<tr><td>' + esc(b.name) + '</td><td>' + esc(b.cat || 'изрично отнесени') + '</td><td class="num">' + m(b.limit) + '</td><td><div class="acts"><button class="btn small" type="button" data-act="edit" data-id="' + b.id + '">Редактирай</button><button class="btn small bad" type="button" data-act="del" data-id="' + b.id + '">' + (S.confirm === b.id ? 'Потвърди изтриването' : 'Изтрий') + '</button></div></td></tr>').join('') + '</tbody></table></section>';
+  return h;
+}
+function vTeam(){
+  const set = S.st.settings, us = S.users || [];
+  const roles = ['member', 'approver', 'owner'].concat(S.st.solo && !S.st.me.office ? ['accountant'] : []);
+  return '<h1>Екип и правила</h1>' +
+    '<section class="card"><h2>Хора с достъп</h2><div class="scroll"><table><thead><tr><th>Имейл</th><th>Име</th><th>Роля</th><th></th></tr></thead><tbody>' + us.map(u => '<tr><td>' + esc(u.email) + (u.me ? ' <span class="dim">(вие)</span>' : '') + '</td><td>' + esc(u.name) + '</td><td>' + Fin.ROLES[u.role] + '</td><td>' + (u.me ? '' : '<button class="btn small bad" type="button" data-act="del-user" data-id="' + u.id + '">' + (S.confirm === u.id ? 'Потвърди' : 'Премахни') + '</button>') + '</td></tr>').join('') + '</tbody></table></div>' +
+    '<form class="form" id="user-form" style="margin-top:14px" novalidate><label>Имейл<input name="email" type="email" autocomplete="off" required></label><label>Име<input name="name" maxlength="80"></label><label>Първа парола (поне 10 знака)<input name="password" type="password" autocomplete="new-password" required></label><label>Роля<select name="role">' + roles.map(r => '<option value="' + r + '">' + Fin.ROLES[r] + '</option>').join('') + '</select></label><div class="full acts"><button class="btn pri" type="submit">Добави човек</button></div></form>' +
+    '<p class="dim">Служителят подава само свои разходи. Одобряващият вижда всичко и решава чужди заявки до лимита си. Собственикът управлява бюджетите, правилата и екипа.' + (roles.includes('accountant') ? ' Счетоводителят получава счетоводната част на FinBridge за тази фирма.' : '') + '</p></section>' +
+    '<section class="card"><h2>Правила и наличност</h2><form class="form" id="set-form" novalidate><label>Наличност по сметките (' + S.st.cur + ')<input name="balance" inputmode="decimal" value="' + String(set.balance).replace('.', ',') + '"></label><label>Към дата<input name="balanceDate" type="date" value="' + esc(set.balanceDate || S.st.today) + '"></label>' +
+    '<label>Лимит на одобряващия (0 = без лимит)<input name="approverLimit" inputmode="decimal" value="' + String(set.approverLimit).replace('.', ',') + '"></label><label>Документ се изисква над сума<input name="receiptOver" inputmode="decimal" value="' + String(set.receiptOver).replace('.', ',') + '"></label>' +
+    '<label class="full">Категории, по една на ред<textarea name="cats" rows="6">' + esc(set.cats.join('\n')) + '</textarea></label><div class="full acts"><button class="btn pri" type="submit">Запази правилата</button></div></form></section>';
+}
+function render(){
+  const st = S.st, r = role(), wait = t => st.items.filter(i => i.type === t && i.status === 'submitted').length;
+  $('firm').textContent = st.firm.name;
+  $('nav').innerHTML = VIEWS.filter(v => v[2](r)).map(v => '<a href="#' + v[0] + '" data-view="' + v[0] + '"' + (S.view === v[0] ? ' class="on" aria-current="page"' : '') + '>' + v[1] + (wait(v[0]) && r !== 'member' ? '<span class="count">' + wait(v[0]) + '</span>' : '') + '</a>').join('');
+  $('foot').innerHTML = '<span>' + esc(st.me.email) + ' · ' + Fin.ROLES[st.me.office ? 'accountant' : r] + '</span>' + (st.me.office ? '<a href="/">Към счетоводната част</a>' : '<a href="#" data-act="logout">Изход</a>');
+  const body = S.view === 'dash' ? vDash() : S.view === 'budget' ? vBudget() : S.view === 'team' ? vTeam() : vList(S.view);
+  $('main').innerHTML = (st.me.office ? '<div class="note info">Преглеждате финансите на фирмата като счетоводител.</div>' : '') + (S.msg ? '<div class="note ' + S.msg.cls + '" role="status">' + esc(S.msg.text) + '</div>' : '') + body;
+}
+async function go(v){ S.view = v; if (location.hash.slice(1) !== v) history.replaceState(null, '', '#' + v); S.form = null; S.reject = null; S.confirm = null; S.msg = null; S.filter = { status: '', q: '' }; if (v === 'team') try { S.users = await api('GET', '/api/fin/users'); } catch (e) { S.msg = { cls: 'crit', text: e.message }; } render(); }
+const status = (id, status, note) => api('POST', '/api/fin/items/' + id + '/status', { status, note });
+document.addEventListener('click', e => {
+  const nav = e.target.closest('[data-view]'); if (nav){ e.preventDefault(); return go(nav.dataset.view); }
+  const el = e.target.closest('[data-act]'); if (!el) return;
+  const a = el.dataset.act, id = el.dataset.id, it = id && S.st.items.find(i => i.id === id);
+  if (a !== 'del' && a !== 'del-user') S.confirm = null;
+  switch (a){
+    case 'logout': e.preventDefault(); return api('POST', '/api/logout').then(() => { location.href = '/login'; });
+    case 'new': S.form = { type: el.dataset.type, data: null }; S.reject = null; if (S.view !== 'dash' || el.dataset.type !== 'expense') S.view = el.dataset.type; S.msg = null; return render();
+    case 'edit': S.form = { type: it.type, data: it }; S.reject = null; return render();
+    case 'cancel': S.form = null; S.reject = null; return render();
+    case 'approve': return act(() => status(id, 'approved'), 'Одобрено.' + (it.file && it.type === 'expense' ? ' Документът е изпратен на счетоводителя.' : ''));
+    case 'reject': S.reject = id; S.form = null; return render();
+    case 'paid': return act(() => status(id, 'paid'), 'Отбелязано като платено.');
+    case 'void': return act(() => status(id, 'void'), 'Фактурата е анулирана.');
+    case 'reopen-inv': return act(() => status(id, 'open'));
+    case 'resubmit': return act(() => status(id, 'submitted'));
+    case 'del': if (S.confirm !== id){ S.confirm = id; return render(); } S.confirm = null; return act(() => api('DELETE', '/api/fin/items/' + id), 'Изтрито.');
+    case 'del-user': if (S.confirm !== id){ S.confirm = id; return render(); } S.confirm = null; return act(async () => { await api('DELETE', '/api/fin/users/' + id); S.users = await api('GET', '/api/fin/users'); }, 'Достъпът е премахнат.');
+    case 'csv': { const t = el.dataset.type, rows = [['Дата', T[t].party, 'Номер', 'Падеж', 'Сума', 'Категория', 'Платено с', 'Състояние', 'Подал', 'Бележка']].concat(items(t).map(i => [i.date, i.party, i.number, i.due, String(i.amount).replace('.', ','), i.cat, t === 'expense' ? Fin.PAY[i.pay] : '', Fin.STATUS[i.status], i.by, i.note]));
+      const url = URL.createObjectURL(new Blob([Fin.toCsv(rows)], { type: 'text/csv;charset=utf-8' })), l = document.createElement('a'); l.href = url; l.download = 'finbridge-' + t + '-' + S.st.today + '.csv'; document.body.appendChild(l); l.click(); l.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000); return; }
+  }
+});
+document.addEventListener('submit', e => {
+  e.preventDefault(); const f = e.target, v = Object.fromEntries(new FormData(f).entries());
+  if (f.id === 'item-form'){
+    const file = f.elements.file.files[0], type = f.dataset.type, id = f.dataset.id; delete v.file;
+    return act(async () => {
+      const it = id ? await api('PUT', '/api/fin/items/' + id, { data: v }) : await api('POST', '/api/fin/items', { type, data: v });
+      if (file) await api('POST', '/api/fin/items/' + it.id + '/file?name=' + encodeURIComponent(file.name), file, true);
+      S.form = null;
+    }, id ? 'Записано.' : 'Добавено.');
+  }
+  if (f.id === 'reject-form') return act(async () => { await status(f.dataset.id, 'rejected', v.note); S.reject = null; }, 'Заявката е отказана.');
+  if (f.id === 'budget-form') return act(async () => { if (f.dataset.id) await api('PUT', '/api/fin/items/' + f.dataset.id, { data: v }); else await api('POST', '/api/fin/items', { type: 'budget', data: v }); S.form = null; }, 'Бюджетът е записан.');
+  if (f.id === 'user-form') return act(async () => { await api('POST', '/api/fin/users', v); S.users = await api('GET', '/api/fin/users'); }, 'Достъпът е създаден. Предайте паролата на човека.');
+  if (f.id === 'set-form') return act(() => api('PUT', '/api/fin/settings', { data: Object.assign(v, { cats: v.cats.split('\n') }) }), 'Правилата са записани.');
+});
+document.addEventListener('change', e => { if (e.target.id === 'f-status'){ S.filter.status = e.target.value; render(); } });
+document.addEventListener('input', e => { if (e.target.id === 'f-q'){ S.filter.q = e.target.value; const pos = e.target.selectionStart; render(); const n = $('f-q'); n.focus(); n.setSelectionRange(pos, pos); } });
+load().then(() => { const h = location.hash.slice(1); if (VIEWS.some(v => v[0] === h && v[2](role()))) return go(h); render(); }).catch(e => { $('main').innerHTML = '<div class="note crit">' + esc(e.message) + '</div>'; });
+addEventListener('hashchange', () => { const h = location.hash.slice(1); if (S.st && h !== S.view && VIEWS.some(v => v[0] === h && v[2](role()))) go(h); });
+setInterval(() => { if (!S.form && !S.reject && !S.busy && S.view !== 'team' && document.activeElement.id !== 'f-q') load().then(render).catch(() => {}); }, 20000);
+})();
+</script>
+</body>
+</html>
