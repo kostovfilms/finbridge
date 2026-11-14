@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS replies(id TEXT PRIMARY KEY, office_id TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS autolog(office_id TEXT NOT NULL, firm_id TEXT NOT NULL, sent_at TEXT NOT NULL, count INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS resets(token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires INTEGER NOT NULL);
 `);
+for (const sql of ["ALTER TABLE files ADD COLUMN kind TEXT NOT NULL DEFAULT 'invoice'", "ALTER TABLE files ADD COLUMN tx_hint TEXT NOT NULL DEFAULT ''", "ALTER TABLE files ADD COLUMN period_hint TEXT NOT NULL DEFAULT ''"]){ try { db.exec(sql); } catch (e) { /* колоната вече съществува */ } }
+db.exec("CREATE TABLE IF NOT EXISTS questions(id TEXT PRIMARY KEY, office_id TEXT NOT NULL, firm_id TEXT NOT NULL, period TEXT NOT NULL, tx_id TEXT NOT NULL, question TEXT NOT NULL, answer TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, asked TEXT NOT NULL, answered TEXT NOT NULL DEFAULT '')");
 const q = sql => db.prepare(sql);
 const now = () => new Date().toISOString();
 const rid = n => crypto.randomBytes(n).toString('base64url');
@@ -95,13 +97,24 @@ function sniff(b){
   if (b.slice(0, 4).toString('latin1') === 'RIFF' && b.slice(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
   return null;
 }
-function storeFile(officeId, firmId, name, buf, source, note){
+const KINDS = ['invoice', 'contract', 'statement', 'other'];
+const STMT = { csv: 'text/csv', txt: 'text/plain', sta: 'text/plain', mt940: 'text/plain', 940: 'text/plain', xml: 'application/xml', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pdf: 'application/pdf' };
+function storeFile(officeId, firmId, name, buf, source, note, extra){
+  extra = extra || {};
   if (!buf.length) bad(400, 'empty', 'Празен файл.');
-  const mime = sniff(buf); if (!mime) bad(415, 'bad_type', 'Приемат се само снимки (JPG, PNG, WebP, GIF) и PDF.');
-  const id = rid(12);
+  const kind = KINDS.includes(extra.kind) ? extra.kind : 'invoice';
+  let mime = sniff(buf);
+  if (kind === 'statement'){
+    const ext = (/\.([A-Za-z0-9]+)$/.exec(String(name || '')) || [])[1], want = STMT[String(ext || '').toLowerCase()];
+    if (!want) bad(415, 'bad_type', 'За извлечение се приемат CSV, TXT, MT940, XML, XLSX и PDF.');
+    if (want === 'application/pdf' ? mime !== want : want.includes('spreadsheet') ? buf.readUInt16BE(0) !== 0x504B : buf.subarray(0, 2048).includes(0)) bad(415, 'bad_type', 'Файлът не отговаря на разширението си.');
+    mime = want;
+  } else if (!mime) bad(415, 'bad_type', 'Приемат се само снимки (JPG, PNG, WebP, GIF) и PDF.');
+  const id = rid(12), clean = (v, n) => String(v || '').replace(/[\u0000-\u001f]/g, ' ').slice(0, n);
   fs.writeFileSync(path.join(DATA, 'files', id), buf);
-  q('INSERT INTO files(id, office_id, firm_id, name, mime, size, source, note, status, created) VALUES(?,?,?,?,?,?,?,?,?,?)')
-    .run(id, officeId, firmId, String(name || 'file').replace(/[\u0000-\u001f\\/]/g, '_').slice(0, 120), mime, buf.length, source, String(note || '').replace(/[\u0000-\u001f]/g, ' ').slice(0, 300), source === 'client' ? 'new' : 'done', now());
+  q('INSERT INTO files(id, office_id, firm_id, name, mime, size, source, note, status, created, kind, tx_hint, period_hint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run(id, officeId, firmId, String(name || 'file').replace(/[\u0000-\u001f\\/]/g, '_').slice(0, 120), mime, buf.length, source, clean(note, 300), source === 'client' ? 'new' : 'done', now(), kind,
+      /^[A-Za-z0-9_-]{1,60}$/.test(extra.tx || '') ? extra.tx : '', PERIOD.test(extra.period || '') ? extra.period : '');
   return id;
 }
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
@@ -184,11 +197,35 @@ const STATIC = { '/shim.js': 'text/javascript', '/vendor/pdf.min.js': 'text/java
 const money = n => Math.abs(n).toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 function portalPage(firm){
   const d = JSON.parse(firm.data), all = missingFor(firm.office_id, firm.id), open = all.filter(x => !x.replied);
-  const li = x => '<li data-period="' + esc(x.period) + '" data-tx="' + esc(x.tx.id) + '"><b>' + esc(String(x.tx.date).slice(8, 10) + '.' + String(x.tx.date).slice(5, 7)) + '</b> · ' + esc(x.tx.cp) + ' · ' + esc(money(+x.tx.amount || 0)) +
-    (x.replied ? ' <span class="dim">(изпратено обяснение)</span>' : ' <button type="button" class="nodoc">Няма документ</button>') + '</li>';
-  const list = all.length ? '<p>' + (open.length ? 'Липсват документи за ' + open.length + (open.length === 1 ? ' плащане' : ' плащания') + ':' : 'За всички плащания сте изпратили обяснение.') + '</p><ul id="missing">' + all.slice(0, 100).map(li).join('') + '</ul>'
-    : '<p>В момента няма плащания, за които да липсва документ. Можете да качите документи и предварително.</p>';
-  return page('portal.html').replace('{{FIRM}}', esc(d.name || '')).replace('{{LIST}}', list);
+  const periods = q('SELECT period, data FROM periods WHERE office_id = ? AND firm_id = ? ORDER BY period DESC LIMIT 3').all(firm.office_id, firm.id).map(r => { try { return Object.assign(JSON.parse(r.data), { period: r.period }); } catch (e) { return null; } }).filter(p => p && Array.isArray(p.txs));
+  const dm = x => esc(String(x).slice(8, 10) + '.' + String(x).slice(5, 7)), card = (title, body) => '<section class="card">' + (title ? '<h2>' + title + '</h2>' : '') + body + '</section>';
+  let out = '';
+  const latest = periods.find(p => p.txs.length);
+  if (latest){
+    const need = latest.txs.filter(t => t.needsDoc && t.amount < 0), done = need.filter(t => t.docId).length, cur = Core.cur(latest.period);
+    const left = Core.dayDiff(Core.deadline(latest.period), now().slice(0, 10)), mine = open.filter(x => x.period === latest.period), vat = mine.reduce((s, x) => s + Math.abs(+x.tx.amount || 0), 0) * 20 / 120;
+    out += card(esc(Core.periodLabel(latest.period)), '<p><b>' + done + ' от ' + need.length + '</b> плащания са с документ.</p><div class="bar"><i style="width:' + (need.length ? Math.round(done / need.length * 100) : 100) + '%"></i></div>' +
+      '<p class="dim">Срок за счетоводството: ' + dm(Core.deadline(latest.period)) + (left > 0 ? ', остават ' + left + (left === 1 ? ' ден' : ' дни') : left === 0 ? ', днес' : ', изтекъл') + '.</p>' +
+      (vat >= 1 ? '<p class="warn">Без липсващите документи фирмата може да не приспадне до около ' + esc(money(vat)) + ' ' + cur + ' ДДС.</p>' : ''));
+  }
+  const qs = q("SELECT id, period, tx_id, question FROM questions WHERE office_id = ? AND firm_id = ? AND status = 'open' ORDER BY asked").all(firm.office_id, firm.id);
+  if (qs.length) out += card('Въпроси от счетоводителя', '<ul class="plain">' + qs.map(x => { const p = periods.find(p => p.period === x.period), t = p && p.txs.find(t => t.id === x.tx_id);
+    return '<li data-q="' + esc(x.id) + '">' + (t ? '<span class="dim">' + dm(t.date) + ' · ' + esc(t.cp) + ' · ' + esc(money(+t.amount || 0)) + '</span><br>' : '') + '<b>' + esc(x.question) + '</b><div class="reply"><input type="text" maxlength="500" placeholder="Вашият отговор" aria-label="Отговор на въпроса"><button type="button" class="answer">Изпрати</button></div></li>'; }).join('') + '</ul>');
+  const li = x => '<li data-period="' + esc(x.period) + '" data-tx="' + esc(x.tx.id) + '"><b>' + dm(x.tx.date) + '</b> · ' + esc(x.tx.cp) + ' · ' + esc(money(+x.tx.amount || 0)) +
+    (x.replied ? ' <span class="dim">(изпратено обяснение)</span>' : '<div class="acts"><button type="button" class="forpay">Качи документ</button><button type="button" class="nodoc">Няма документ</button></div>') + '</li>';
+  out += card('Липсващи документи', all.length ? '<p>' + (open.length ? 'Липсват документи за ' + open.length + (open.length === 1 ? ' плащане' : ' плащания') + ':' : 'За всички плащания сте изпратили обяснение.') + '</p><ul id="missing" class="plain">' + all.slice(0, 100).map(li).join('') + '</ul>'
+    : '<p>В момента няма плащания, за които да липсва документ. Можете да качите документи и предварително.</p>');
+  out += '{{UPLOAD}}';
+  const hist = q("SELECT name, kind, status, created FROM files WHERE office_id = ? AND firm_id = ? AND source = 'client' ORDER BY created DESC LIMIT 15").all(firm.office_id, firm.id);
+  if (hist.length) out += card('Изпратени от вас', '<ul class="plain">' + hist.map(f => '<li>' + dm(f.created) + ' · ' + esc(f.name) + ' · <span class="' + (f.status === 'new' ? 'dim">получен, чака обработка' : 'ok">обработен') + '</span></li>').join('') + '</ul>');
+  if (d.stats && periods.length){
+    const sum = (p, sign) => p.txs.reduce((s, t) => s + (Math.sign(t.amount) === sign ? Math.abs(+t.amount || 0) : 0), 0), top = {};
+    if (latest) for (const t of latest.txs) if (t.amount < 0) top[t.cp] = (top[t.cp] || 0) + Math.abs(+t.amount || 0);
+    out += card('Обобщение по банкови движения', '<table><tr><th>Месец</th><th class="num">Разходи</th><th class="num">Постъпления</th></tr>' + periods.map(p => '<tr><td>' + esc(Core.periodLabel(p.period)) + '</td><td class="num">' + esc(money(sum(p, -1))) + '</td><td class="num">' + esc(money(sum(p, 1))) + '</td></tr>').join('') + '</table>' +
+      (latest ? '<p class="dim" style="margin-top:10px">Най-големи получатели за ' + esc(Core.periodLabel(latest.period)) + ':</p><table>' + Object.entries(top).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => '<tr><td>' + esc(k) + '</td><td class="num">' + esc(money(v)) + '</td></tr>').join('') + '</table>' : ''));
+  }
+  const tpl = page('portal.html'), up = /<!--UPLOAD-->([\s\S]*?)<!--\/UPLOAD-->/.exec(tpl)[1];
+  return tpl.replace(/<!--UPLOAD-->[\s\S]*?<!--\/UPLOAD-->/, '').replace('{{FIRM}}', esc(d.name || '')).replace('{{CARDS}}', () => out.replace('{{UPLOAD}}', () => up));
 }
 
 /* ---------- автоматични напомняния ---------- */
@@ -228,7 +265,7 @@ async function handle(req, res){
   if (m === 'GET' && STATIC[p]) return send(res, 200, fs.readFileSync(path.join(PUB, p)), { 'Content-Type': STATIC[p] + '; charset=utf-8', 'Cache-Control': 'public, max-age=3600' });
 
   /* client portal: no login, the secret link is the key */
-  if ((a = /^\/u\/([A-Za-z0-9_-]{20,64})(\/upload|\/reply)?$/.exec(p))){
+  if ((a = /^\/u\/([A-Za-z0-9_-]{20,64})(\/upload|\/reply|\/answer)?$/.exec(p))){
     const firm = q('SELECT * FROM firms WHERE portal_token = ?').get(a[1]);
     if (!firm) return html(res, '<!DOCTYPE html><meta charset="utf-8"><title>FinBridge</title><p style="font-family:sans-serif;padding:24px">Тази връзка не е валидна. Поискайте нова от счетоводителя си.</p>', 404);
     if (!a[2] && m === 'GET') return html(res, portalPage(firm));
@@ -242,10 +279,18 @@ async function handle(req, res){
       q('INSERT INTO replies(id, office_id, firm_id, period, tx_id, note, status, created) VALUES(?,?,?,?,?,?,?,?)').run(rid(12), firm.office_id, firm.id, hit.period, hit.tx.id, note, 'new', now());
       return send(res, 200, { ok: true });
     }
+    if (a[2] === '/answer' && m === 'POST'){
+      limit('rp:' + a[1], 60, 3600000);
+      const b = await readJson(req), text = String(b.text || '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 500);
+      if (text.length < 1) bad(400, 'bad_note', 'Напишете отговор.');
+      const r = q("UPDATE questions SET answer = ?, status = 'answered', answered = ? WHERE id = ? AND office_id = ? AND firm_id = ? AND status = 'open'").run(text, now(), String(b.id || ''), firm.office_id, firm.id);
+      if (!r.changes) bad(404, 'no_question', 'Този въпрос вече е затворен.');
+      return send(res, 200, { ok: true });
+    }
     if (a[2] === '/upload' && m === 'POST'){
       limit('up:' + a[1], 60, 3600000);
       const buf = await readBody(req, MAX_FILE);
-      storeFile(firm.office_id, firm.id, url.searchParams.get('name'), buf, 'client', url.searchParams.get('note'));
+      storeFile(firm.office_id, firm.id, url.searchParams.get('name'), buf, 'client', url.searchParams.get('note'), { kind: url.searchParams.get('kind'), tx: url.searchParams.get('tx'), period: url.searchParams.get('period') });
       return send(res, 200, { ok: true });
     }
     bad(405, 'method');
@@ -337,12 +382,28 @@ async function handle(req, res){
   }
   if (p === '/api/backup' && m === 'GET'){
     const out = { exportedAt: now(), office: user.office, firms: q('SELECT id, data FROM firms WHERE office_id = ?').all(O).map(r => Object.assign({ id: r.id }, JSON.parse(r.data))),
-      periods: q('SELECT firm_id, period, data FROM periods WHERE office_id = ? ORDER BY firm_id, period').all(O).map(r => JSON.parse(r.data)) };
+      periods: q('SELECT firm_id, period, data FROM periods WHERE office_id = ? ORDER BY firm_id, period').all(O).map(r => JSON.parse(r.data)),
+      questions: q('SELECT firm_id AS firm, period, tx_id AS tx, question, answer, status, asked, answered FROM questions WHERE office_id = ? ORDER BY asked').all(O) };
     return send(res, 200, Buffer.from(JSON.stringify(out, null, 1)), { 'Content-Type': 'application/json; charset=utf-8', 'Content-Disposition': 'attachment; filename="finbridge-arhiv-' + now().slice(0, 10) + '.json"', 'Cache-Control': 'no-store' });
   }
   if (p === '/api/replies' && m === 'GET') return send(res, 200, q("SELECT id, firm_id AS firm, period, tx_id AS tx, note, created FROM replies WHERE office_id = ? AND status = 'new' ORDER BY created").all(O));
   if ((a = /^\/api\/replies\/([A-Za-z0-9_-]{8,40})\/done$/.exec(p)) && m === 'POST'){
     q("UPDATE replies SET status = 'done' WHERE id = ? AND office_id = ?").run(a[1], O); return send(res, 200, { ok: true });
+  }
+  if (p === '/api/questions' && m === 'GET') return send(res, 200, q("SELECT id, firm_id AS firm, period, tx_id AS tx, question, answer, asked FROM questions WHERE office_id = ? AND status != 'closed' ORDER BY asked").all(O));
+  if (p === '/api/questions' && m === 'POST'){
+    const b = await readJson(req), text = String(b.text || '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 300), firm = String(b.firm || ''), per = String(b.period || ''), tx = String(b.tx || '');
+    const f = q('SELECT * FROM firms WHERE office_id = ? AND id = ?').get(O, firm);
+    if (!f) bad(404, 'no_firm'); if (!PERIOD.test(per) || !/^[A-Za-z0-9_-]{1,60}$/.test(tx)) bad(400, 'bad_id'); if (text.length < 2) bad(400, 'bad_text', 'Напишете въпроса.');
+    if (q("SELECT COUNT(*) AS n FROM questions WHERE office_id = ? AND firm_id = ? AND status = 'open'").get(O, firm).n >= 50) bad(400, 'too_many', 'Има твърде много отворени въпроси към тази фирма.');
+    const id = rid(12); q('INSERT INTO questions(id, office_id, firm_id, period, tx_id, question, status, asked) VALUES(?,?,?,?,?,?,?,?)').run(id, O, firm, per, tx, text, 'open', now());
+    const d = JSON.parse(f.data), to = String(d.address || '').trim();
+    if (SMTP.host && SMTP.from && EMAIL.test(to)) sendMail({ to, replyTo: user.email, subject: 'Въпрос от счетоводителя', text: 'Здравейте' + (d.contact ? ', ' + d.contact : '') + '!\nСчетоводителят ви има въпрос:\n' + text + '\nОтговорете тук: ' + origin(req) + '/u/' + f.portal_token })
+      .catch(e => console.error(now(), 'имейл с въпрос не беше изпратен:', e.message));
+    return send(res, 200, { id });
+  }
+  if ((a = /^\/api\/questions\/([A-Za-z0-9_-]{8,40})\/close$/.exec(p)) && m === 'POST'){
+    q("UPDATE questions SET status = 'closed' WHERE id = ? AND office_id = ?").run(a[1], O); return send(res, 200, { ok: true });
   }
   if (p === '/api/remind-now' && m === 'POST' && REMIND.anytime) return send(res, 200, { sent: await remindTick() });
 
@@ -354,7 +415,7 @@ async function handle(req, res){
     if (m === 'PUT'){
       const b = await readJson(req), d = b.data && typeof b.data === 'object' ? b.data : bad(400, 'bad_data');
       const s = (v, n) => String(v == null ? '' : v).trim().slice(0, n);
-      const data = JSON.stringify({ name: s(d.name, 160), eik: s(d.eik, 20), contact: s(d.contact, 120), channel: s(d.channel, 20), address: s(d.address, 200), auto: d.auto === true });
+      const data = JSON.stringify({ name: s(d.name, 160), eik: s(d.eik, 20), contact: s(d.contact, 120), channel: s(d.channel, 20), address: s(d.address, 200), auto: d.auto === true, stats: d.stats === true });
       if (!JSON.parse(data).name) bad(400, 'bad_name', 'Липсва име на фирмата.');
       if (cur) q('UPDATE firms SET data = ? WHERE office_id = ? AND id = ?').run(data, O, id);
       else { if (q('SELECT COUNT(*) AS n FROM firms WHERE office_id = ?').get(O).n >= 2000) bad(400, 'too_many'); q('INSERT INTO firms(office_id, id, data, portal_token) VALUES(?,?,?,?)').run(O, id, data, rid(24)); }
@@ -364,7 +425,7 @@ async function handle(req, res){
       for (const f of q('SELECT id FROM files WHERE office_id = ? AND firm_id = ?').all(O, id)) fs.rmSync(path.join(DATA, 'files', f.id), { force: true });
       q('DELETE FROM files WHERE office_id = ? AND firm_id = ?').run(O, id);
       q('DELETE FROM periods WHERE office_id = ? AND firm_id = ?').run(O, id);
-      q('DELETE FROM replies WHERE office_id = ? AND firm_id = ?').run(O, id); q('DELETE FROM autolog WHERE office_id = ? AND firm_id = ?').run(O, id);
+      q('DELETE FROM replies WHERE office_id = ? AND firm_id = ?').run(O, id); q('DELETE FROM questions WHERE office_id = ? AND firm_id = ?').run(O, id); q('DELETE FROM autolog WHERE office_id = ? AND firm_id = ?').run(O, id);
       q('DELETE FROM firms WHERE office_id = ? AND id = ?').run(O, id);
       return send(res, 200, { ok: true });
     }
@@ -389,7 +450,7 @@ async function handle(req, res){
     }
     if (m === 'DELETE'){ q('DELETE FROM periods WHERE office_id = ? AND firm_id = ? AND period = ?').run(O, firm, per); return send(res, 200, { ok: true }); }
   }
-  if (p === '/api/inbox' && m === 'GET') return send(res, 200, q("SELECT id, firm_id AS firm, name, mime, size, note, created FROM files WHERE office_id = ? AND status = 'new' ORDER BY created").all(O));
+  if (p === '/api/inbox' && m === 'GET') return send(res, 200, q("SELECT id, firm_id AS firm, name, mime, size, note, created, kind, tx_hint AS tx, period_hint AS period FROM files WHERE office_id = ? AND status = 'new' ORDER BY created").all(O));
   if (p === '/api/files' && m === 'POST'){
     const firm = url.searchParams.get('firm') || '';
     if (!q('SELECT 1 FROM firms WHERE office_id = ? AND id = ?').get(O, firm)) bad(404, 'no_firm');
@@ -398,7 +459,7 @@ async function handle(req, res){
   if ((a = /^\/api\/files\/([A-Za-z0-9_-]{8,40})(\/done)?$/.exec(p))){
     const f = q('SELECT * FROM files WHERE id = ? AND office_id = ?').get(a[1], O); if (!f) bad(404, 'not_found');
     if (a[2] && m === 'POST'){ q("UPDATE files SET status = 'done' WHERE id = ?").run(f.id); return send(res, 200, { ok: true }); }
-    if (m === 'GET') return send(res, 200, fs.readFileSync(path.join(DATA, 'files', f.id)), { 'Content-Type': f.mime, 'Content-Disposition': "inline; filename*=UTF-8''" + encodeURIComponent(f.name), 'Content-Security-Policy': 'sandbox', 'Cache-Control': 'private, no-store' });
+    if (m === 'GET') return send(res, 200, fs.readFileSync(path.join(DATA, 'files', f.id)), { 'Content-Type': f.mime, 'Content-Disposition': (/^image\/|^application\/pdf$/.test(f.mime) ? 'inline' : 'attachment') + "; filename*=UTF-8''" + encodeURIComponent(f.name), 'Content-Security-Policy': 'sandbox', 'Cache-Control': 'private, no-store' });
     if (m === 'DELETE'){ fs.rmSync(path.join(DATA, 'files', f.id), { force: true }); q('DELETE FROM files WHERE id = ?').run(f.id); return send(res, 200, { ok: true }); }
   }
   if (p === '/api/ai' && m === 'POST'){

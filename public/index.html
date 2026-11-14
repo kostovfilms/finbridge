@@ -546,7 +546,7 @@ const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
 function pref(k, v){ try { if (v === undefined) return localStorage.getItem('fb.' + k); localStorage.setItem('fb.' + k, v); } catch (e) {} return null; }
 
 const S = {period: pref('period') || Core.shiftPeriod(todayISO().slice(0, 7), -1), firm: pref('firm'), doc: null, mode: 'boot', firms: [], firmsReady: false,
-  editing: null, imp: null, upl: null, onlyMissing: false, exp: 'docs', dec: ',', toast: null, slow: false, busy: null, rem: {}, stale: false, inbox: [], replies: [], users: null, ecfg: (() => { try { return JSON.parse(pref('ecfg') || '{}') || {}; } catch (e) { return {}; } })()};
+  editing: null, imp: null, upl: null, onlyMissing: false, exp: 'docs', dec: ',', toast: null, slow: false, busy: null, rem: {}, stale: false, inbox: [], replies: [], questions: [], users: null, ecfg: (() => { try { return JSON.parse(pref('ecfg') || '{}') || {}; } catch (e) { return {}; } })()};
 if (!/^\d{4}-\d{2}$/.test(S.period)) S.period = Core.shiftPeriod(todayISO().slice(0, 7), -1);
 const ALL = {}, pend = {}, chain = {};
 let db = null, sample = null, downloads = null, imgOK = false, unsubP = null;
@@ -599,7 +599,7 @@ async function boot(){
   if (u){ try { S.canEdit = await u.canEdit(); } catch (e) {} }
   if (!d){ S.mode = 'mem'; S.firmsReady = S.periodReady = true; return render(); }
   db = d; S.mode = 'db'; loadOffice();
-  if (window.FB){ const pull = async () => { try { const [l, r] = await Promise.all([FB.inbox(), FB.replies()]); if (JSON.stringify([l, r]) !== JSON.stringify([S.inbox, S.replies])){ S.inbox = l; S.replies = r; softRender(); } } catch (e) {} }; pull(); setInterval(pull, 15000); }
+  if (window.FB){ const pull = async () => { try { const [l, r, qq] = await Promise.all([FB.inbox(), FB.replies(), FB.questions()]); if (JSON.stringify([l, r, qq]) !== JSON.stringify([S.inbox, S.replies, S.questions])){ S.inbox = l; S.replies = r; S.questions = qq; softRender(); } } catch (e) {} }; pull(); setInterval(pull, 15000); }
   const timer = setTimeout(() => { if (!S.firmsReady){ S.slow = true; softRender(); } }, 10000);
   db.collection('firms').onSnapshot(snap => {
     clearTimeout(timer);
@@ -628,7 +628,7 @@ function autoMatch(p){
     const taken = new Set(p.docs.filter(x => x !== d && x.suggestTx).map(x => x.suggestTx));
     const r = Core.decideMatch(d, p.txs.filter(t => !taken.has(t.id)));
     if (r.tx && r.auto){ link(p, d, r.tx); n++; }
-    else d.suggestTx = r.tx ? r.tx.id : null;
+    else d.suggestTx = r.tx ? r.tx.id : (d.hintTx && p.txs.some(t => t.id === d.hintTx && !t.docId && !taken.has(t.id)) ? d.hintTx : null);
   }
   return n;
 }
@@ -789,6 +789,7 @@ async function onStatement(file){
 }
 async function confirmImport(){
   const imp = S.imp; S.imp = null;
+  if (imp.inboxId && window.FB){ S.inbox = S.inbox.filter(x => x.id !== imp.inboxId); FB.done(imp.inboxId).catch(() => {}); }
   const by = {};
   for (const t of Core.withKeys(imp.txs)) (by[t.date.slice(0, 7)] = by[t.date.slice(0, 7)] || []).push(t);
   let added = 0, dup = 0, matched = 0, other = 0;
@@ -843,7 +844,7 @@ async function onDocs(files){
       d.issues = [err ? 'Не беше разчетен автоматично: ' + err : 'Автоматичното разчитане не е достъпно. Въведете данните ръчно.'];
       S.upl.errors.push(f.name);
     }
-    Object.assign(d, {id: uid('d'), file: f.name, source: item.inboxId ? 'От клиента' : 'Качен файл', ai: true, fileId, received: todayISO(), txId: null, suggestTx: null});
+    Object.assign(d, {id: uid('d'), file: f.name, source: item.inboxId ? 'От клиента' : 'Качен файл', ai: true, fileId, hintTx: item.tx || null, received: todayISO(), txId: null, suggestTx: null});
     if (item.inboxId){ try { await FB.done(item.inboxId); } catch (e) {} S.inbox = S.inbox.filter(x => x.id !== item.inboxId); }
     p.docs.unshift(d);
     S.upl.linked += autoMatch(p);
@@ -889,7 +890,8 @@ function firmForm(f){
     '<label>Лице за контакт<input type="text" id="firm-contact" name="contact" value="' + esc(f.contact || '') + '"></label>' +
     '<label>Канал за напомняния<select id="firm-channel" name="channel">' + ['Viber','Имейл','Телефон'].map(c => '<option' + (f.channel === c ? ' selected' : '') + '>' + c + '</option>').join('') + '</select></label>' +
     '<label>Имейл или телефон<input type="text" id="firm-address" name="address" value="' + esc(f.address || '') + '"></label>' +
-    (window.FB && (FB.me || {}).mail ? '<label class="full" style="flex-direction:row;align-items:center;gap:8px;color:var(--ink);font-size:14px"><input type="checkbox" id="firm-auto" name="auto" style="width:auto"' + (f.auto ? ' checked' : '') + '> Автоматично напомняне по имейл на всеки ' + plural(FB.me.remindDays || 3, 'ден', 'дни') + ', докато има липсващи документи за приключен месец</label>' : '') + '</div>' +
+    (window.FB && (FB.me || {}).mail ? '<label class="full" style="flex-direction:row;align-items:center;gap:8px;color:var(--ink);font-size:14px"><input type="checkbox" id="firm-auto" name="auto" style="width:auto"' + (f.auto ? ' checked' : '') + '> Автоматично напомняне по имейл на всеки ' + plural(FB.me.remindDays || 3, 'ден', 'дни') + ', докато има липсващи документи за приключен месец</label>' : '') +
+    (window.FB ? '<label class="full" style="flex-direction:row;align-items:center;gap:8px;color:var(--ink);font-size:14px"><input type="checkbox" id="firm-stats" name="stats" style="width:auto"' + (f.stats ? ' checked' : '') + '> Показвай на клиента обобщение на разходите и постъпленията в страницата му</label>' : '') + '</div>' +
     (f.portal ? '<div class="note info">Връзка за качване от клиента: <span id="portal-url">' + esc(f.portal) + '</span> <button class="btn small" type="button" data-act="copy-portal" data-id="' + f.id + '">' + (S.copied === 'portal' ? 'Копирано' : 'Копирай') + '</button> ' +
       '<button class="btn small quiet" type="button" data-act="reset-portal" data-id="' + f.id + '">' + (S.confirm === 'portal' + f.id ? 'Старата връзка ще спре да работи. Потвърди' : 'Нова връзка') + '</button></div>' : '') +
     '<div class="tools"><button class="btn primary" type="submit">Запази</button><button class="btn" type="button" data-act="cancel">Отказ</button>' +
@@ -908,7 +910,7 @@ function vClients(){
       '<td class="wrap">' + esc(f.contact || '') + ' <span class="chip">' + esc(f.channel || 'Viber') + '</span></td>' +
       '<td><div class="bar"><i style="width:' + (n.length ? Math.round(m / n.length * 100) : 0) + '%"></i></div><div class="dim">' + m + ' от ' + n.length + ' плащания с документ</div></td>' +
       '<td>' + st + (rev ? ' <span class="pill rev">' + rev + ' за преглед</span>' : '') + (S.inbox.some(x => x.firm === f.id) ? ' <span class="pill rev">' + plural(S.inbox.filter(x => x.firm === f.id).length, 'нов файл', 'нови файла') + '</span>' : '') +
-      (S.replies.some(x => x.firm === f.id) ? ' <span class="pill rev">' + plural(S.replies.filter(x => x.firm === f.id).length, 'отговор', 'отговора') + ' от клиента</span>' : '') + '</td>' +
+      ((n => n ? ' <span class="pill rev">' + plural(n, 'отговор', 'отговора') + ' от клиента</span>' : '')(S.replies.filter(x => x.firm === f.id).length + S.questions.filter(x => x.firm === f.id && x.answer).length)) + '</td>' +
       '<td><button class="btn small" data-act="edit-firm" data-id="' + f.id + '">Редактирай</button></td></tr>';
   }).join('');
   const head = '<div class="head"><div><h1>Приключване на ' + Core.periodLabel(per) + '</h1><p class="sub">Кои фирми са готови за осчетоводяване и кои още дължат документи.</p></div><div class="tools">' + ctx(false) +
@@ -938,6 +940,7 @@ function vReconcile(){
     '<button class="btn" data-act="new-tx">Добави плащане ръчно</button>' +
     '<a class="btn" href="#reminders">Напомни за липсващите (' + miss.length + ')</a>' +
     '<label class="dim"><input type="checkbox" id="only-missing"' + (S.onlyMissing ? ' checked' : '') + '> само без документ</label></div>';
+  h += clientBox(f, 'reconcile');
   if (S.imp){
     const i = S.imp, out = i.txs.filter(t => t.amount < 0).length;
     h += '<div class="panel pad"><h2>Преглед преди импорт: ' + esc(i.name) + '</h2><div class="dim">Формат: ' + esc(i.format) + '. Открити ' + plural(i.txs.length, 'движение', 'движения') + ': ' + out + ' изходящи и ' + (i.txs.length - out) + ' входящи.' +
@@ -964,17 +967,32 @@ function vReconcile(){
     if (cls === 'none' && t.amount < 0) act = '<button class="btn small" data-act="need-doc" data-id="' + t.id + '">Изисква документ</button>';
     if (cls === 'rev') act = '<button class="btn small primary" data-act="confirm" data-id="' + suggested(p, t).id + '">Потвърди</button> <button class="btn small" data-act="show-doc" data-id="' + suggested(p, t).id + '">Виж</button>';
     if (cls === 'ok') act = '<button class="btn small" data-act="show-doc" data-id="' + t.docId + '">Виж документа</button>';
+    if (window.FB && t.amount < 0 && !t.docId) act += ' <button class="btn small" data-act="ask" data-id="' + t.id + '">Попитай</button>';
     act += ' <button class="btn small quiet" data-act="del-tx" data-id="' + t.id + '" aria-label="Изтрий плащането">' + (S.confirm === 'tx' + t.id ? 'Сигурно?' : 'Изтрий') + '</button>';
     return '<tr class="s-' + cls + '"><td class="num">' + D(t.date) + '</td><td class="wrap">' + esc(t.cp) + (t.desc && t.desc !== t.cp ? '<div class="dim">' + esc(t.desc) + '</div>' : '') + '</td><td><span class="chip">' + esc(t.kind) + '</span></td>' +
       '<td class="num">' + M(t.amount) + '</td><td><span class="pill ' + cls + '">' + label + '</span> <span class="dim">' + esc(extra) + '</span>' +
       (rp && !t.docId ? '<div class="note info" style="margin-top:6px">Клиентът отговори: ' + esc(rp.note) + '<div class="tools" style="margin-top:6px"><button class="btn small primary" data-act="reply-ok" data-id="' + rp.id + '">Приеми без документ</button><button class="btn small" data-act="reply-no" data-id="' + rp.id + '">Искам документ</button></div></div>' : '') +
-      (t.note && !t.needsDoc ? '<div class="dim">бележка: ' + esc(t.note) + '</div>' : '') + '</td><td style="white-space:nowrap">' + act + '</td></tr>';
+      (t.note && !t.needsDoc ? '<div class="dim">бележка: ' + esc(t.note) + '</div>' : '') +
+      S.questions.filter(x => x.firm === f.id && x.period === S.period && x.tx === t.id).map(x => '<div class="note info" style="margin-top:6px">Въпрос: ' + esc(x.question) + (x.answer ? '<br><strong>Отговор на клиента:</strong> ' + esc(x.answer) : ' <span class="dim">(чака отговор)</span>') +
+        ' <button class="btn small" data-act="q-close" data-id="' + x.id + '">Затвори</button></div>').join('') +
+      (S.editing && S.editing.type === 'ask' && S.editing.tx === t.id ? '<form data-form="ask" class="tools" style="margin-top:6px"><input type="hidden" name="tx" value="' + t.id + '"><input type="text" id="ask-text" name="text" required maxlength="300" placeholder="Въпрос към клиента" aria-label="Въпрос към клиента" style="flex:1;min-width:180px"><button class="btn small primary" type="submit">Изпрати</button><button class="btn small" type="button" data-act="cancel">Отказ</button></form>' : '') + '</td><td style="white-space:nowrap">' + act + '</td></tr>';
   }).join('');
   if (!miss.length && !p.docs.some(d => d.suggestTx && !d.txId)) h += '<div class="note good">Всички плащания на ' + esc(f.name) + ' за периода са покрити.</div>';
   return h + '<div class="panel"><div class="scroll"><table><thead><tr><th class="num">Дата</th><th>Контрагент и основание</th><th>Вид</th><th class="num">Сума</th><th>Статус</th><th>Действие</th></tr></thead><tbody>' +
     (rows || '<tr><td colspan="6" class="empty">Няма плащания без документ.</td></tr>') + '</tbody></table></div></div>';
 }
 
+const KINDS = {invoice: 'Фактура', contract: 'Договор', statement: 'Банково извлечение', other: 'Друг документ'};
+function clientBox(f, where){
+  const mine = S.inbox.filter(x => x.firm === f.id), inv = mine.filter(x => (x.kind || 'invoice') === 'invoice'), rest = mine.filter(x => (x.kind || 'invoice') !== 'invoice' && (where === 'inbox' || x.kind === 'statement'));
+  let h = '';
+  if (where === 'inbox' && inv.length) h += '<div class="note info">Клиентът е качил ' + plural(inv.length, 'нов файл', 'нови файла') + ': ' + esc(inv.slice(0, 5).map(x => x.name).join(', ')) + (inv.length > 5 ? '…' : '') +
+    (inv.some(x => x.note) ? '<br>Бележки: ' + esc([...new Set(inv.filter(x => x.note).map(x => x.note))].join(' · ')) : '') + ' <button class="btn small primary" data-act="read-inbox">Разчети ги</button></div>';
+  if (rest.length) h += '<div class="note info">От клиента:' + rest.map(x => '<div style="margin-top:6px">' + KINDS[x.kind] + ' „' + esc(x.name) + '“' + (x.note ? ' · ' + esc(x.note) : '') + '<div class="tools" style="margin-top:4px">' +
+    (x.kind === 'statement' ? '<button class="btn small primary" data-act="imp-client" data-id="' + x.id + '">Импортирай</button>' : '') +
+    '<a class="btn small" href="/api/files/' + encodeURIComponent(x.id) + '" target="_blank" rel="noopener">Отвори</a><button class="btn small" data-act="file-done" data-id="' + x.id + '">Прегледано</button></div></div>').join('') + '</div>';
+  return h;
+}
 const dupOf = (p, d) => d.number && p.docs.find(x => x !== d && x.number === d.number && (x.supplierEik && d.supplierEik ? x.supplierEik === d.supplierEik : Core.nameSim(x.supplier, d.supplier) >= 0.5));
 function docStatus(p, d){
   if (d.txId){ const t = p.txs.find(x => x.id === d.txId); return ['ok', 'Платен на ' + (t ? D(t.date) : '')]; }
@@ -1003,10 +1021,7 @@ function vInbox(){
   h += '<div class="drop" data-drop="docs"><label class="btn primary" for="doc-files">Качи фактури</label>' +
     '<button class="btn" data-act="new-doc">Въведи ръчно</button><div class="dim" style="margin-top:8px">Снимки (JPG, PNG) или PDF, може и няколко наведнъж. ' +
     (sample ? 'Разчитането е с Claude и ползва вашия лимит.' : 'Автоматичното разчитане не е достъпно в този изглед, данните се въвеждат ръчно.') + '</div></div>';
-  const fresh = S.inbox.filter(x => x.firm === f.id);
-  if (fresh.length) h += '<div class="note info">Клиентът е качил ' + plural(fresh.length, 'нов файл', 'нови файла') + ': ' + esc(fresh.slice(0, 5).map(x => x.name).join(', ')) + (fresh.length > 5 ? '…' : '') +
-    (fresh.some(x => x.note) ? '<br>Бележки: ' + esc(fresh.filter(x => x.note).map(x => x.note).join(' · ')) : '') +
-    ' <button class="btn small primary" data-act="read-inbox">Разчети ги</button></div>';
+  h += clientBox(f, 'inbox');
   const rows = list.map(d => { const [cls, label] = docStatus(p, d);
     return '<tr class="click s-' + cls + (d.id === S.doc ? ' sel' : '') + '" data-act="pick-doc" data-id="' + d.id + '" tabindex="0"><td class="num">' + D(d.date) + '</td>' +
       '<td class="wrap">' + esc(d.supplier || d.file || 'Без име') + '<div class="dim">' + (d.number ? '№ ' + esc(d.number) : esc(d.file || '')) + '</div></td><td class="num">' + M(d.total) + '</td><td><span class="pill ' + cls + '">' + label + '</span></td></tr>'; }).join('');
@@ -1112,6 +1127,8 @@ function render(){
   let miss = 0, rev = 0;
   S.firms.forEach(f => { const p = P(f.id); miss += missing(p).length; rev += p.docs.filter(d => !d.txId && (d.suggestTx || d.issues.length)).length; });
   const counts = {reconcile: miss, inbox: rev + S.inbox.length};
+  const ans = S.replies.length + S.questions.filter(x => x.answer).length;
+  if (ans) counts.reconcile = miss + ' · ' + ans + ' отг.';
   $('nav').innerHTML = VIEWS.map(([id, label]) => '<a href="#' + id + '"' + (id === v ? ' class="on" aria-current="page"' : '') + '>' + label +
     (id in counts ? '<span class="count' + (counts[id] ? '' : ' zero') + '">' + counts[id] + '</span>' : '') + '</a>').join('');
   $('foot').innerHTML = '<div>' + (S.mode === 'db' ? (window.FB ? 'Данните се пазят на сървъра.' : 'Данните се пазят в този артефакт.') : S.mode === 'mem' ? 'Временен режим, без запазване.' : 'Свързване…') + '</div><div>Разчитане с Claude: ' + (sample ? (imgOK ? 'включено' : 'само текст') : 'няма') + '</div>' +
@@ -1164,6 +1181,12 @@ document.addEventListener('click', async e => {
     case 'copy-exp': return copy(exportData(), 'exp');
     case 'reply-ok': { const r = S.replies.find(x => x.id === id), t = r && p.txs.find(x => x.id === r.tx); if (t){ t.needsDoc = false; t.note = r.note; save(); }
       S.replies = S.replies.filter(x => x.id !== id); try { await FB.replyDone(id); } catch (err) {} break; }
+    case 'ask': S.editing = {type: 'ask', tx: id}; break;
+    case 'q-close': S.questions = S.questions.filter(x => x.id !== id); try { await FB.closeQ(id); } catch (err) {} break;
+    case 'file-done': S.inbox = S.inbox.filter(x => x.id !== id); try { await FB.done(id); } catch (err) {} break;
+    case 'imp-client': { const x = S.inbox.find(i => i.id === id); if (!x) break; S.busy = 'Изтеглям извлечението…'; render();
+      try { const file = await FB.file(x); await onStatement(file); if (S.imp) S.imp.inboxId = x.id; } catch (err) { S.busy = null; S.toast = {cls: 'crit', text: 'Файлът не беше изтеглен.'}; }
+      if (view() !== 'reconcile') return go('reconcile'); break; }
     case 'reply-no': S.replies = S.replies.filter(x => x.id !== id); try { await FB.replyDone(id); } catch (err) {} break;
     case 'col-up': case 'col-down': { const on = (S.ecfg.cols && S.ecfg.cols.length ? S.ecfg.cols : Core.DEFAULT_COLS).slice(), i = on.indexOf(id), j = act === 'col-up' ? i - 1 : i + 1;
       if (i >= 0 && j >= 0 && j < on.length){ [on[i], on[j]] = [on[j], on[i]]; S.ecfg.cols = on; saveEcfg(); } S.setupOpen = true; break; }
@@ -1173,7 +1196,7 @@ document.addEventListener('click', async e => {
     case 'copy-portal': return copy(firmById(id).portal, 'portal');
     case 'reset-portal': if (conf !== 'portal' + id){ S.confirm = 'portal' + id; break; } try { const url = await FB.resetPortal(id); firmById(id).portal = url; S.editing = {type: 'firm', data: firmById(id)}; } catch (err) { S.toast = {cls: 'crit', text: 'Връзката не беше сменена.'}; } break;
     case 'read-inbox': { const items = []; S.busy = 'Изтеглям файловете от клиента…'; render();
-      for (const x of S.inbox.filter(i => i.firm === f.id)){ try { items.push({file: await FB.file(x), inboxId: x.id}); } catch (err) {} }
+      for (const x of S.inbox.filter(i => i.firm === f.id && (i.kind || 'invoice') === 'invoice')){ try { items.push({file: await FB.file(x), inboxId: x.id, tx: x.tx}); } catch (err) {} }
       S.busy = null; if (items.length) onDocs(items); else render(); return; }
     case 'send-rem': { const text = $('rem-text').value, list = toAsk(p), q = ensureP(f.id, S.period);
       S.busy = 'Изпращам имейл…'; render();
@@ -1192,6 +1215,11 @@ document.addEventListener('submit', async e => {
   e.preventDefault();
   const v = Object.fromEntries(new FormData(form)), f = curFirm();
   const t = s => String(s || '').trim();
+  if (form.dataset.form === 'ask'){
+    try { await FB.ask(f.id, S.period, v.tx, t(v.text)); S.questions = await FB.questions(); S.toast = {cls: 'good', text: 'Въпросът е изпратен. Клиентът ще го види в страницата си' + (/@/.test(f.address || '') && (FB.me || {}).mail ? ' и ще получи имейл.' : '.')}; }
+    catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Въпросът не беше изпратен.'}; }
+    S.editing = null; return render();
+  }
   if (form.dataset.form === 'user'){
     try { await FB.addUser(t(v.email), v.password); S.users = await FB.users(); S.toast = {cls: 'good', text: 'Добавен е ' + t(v.email) + '. Предайте му паролата по сигурен канал.'}; }
     catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Неуспешно.'}; }
@@ -1203,7 +1231,7 @@ document.addEventListener('submit', async e => {
     return render();
   }
   if (form.dataset.form === 'firm'){
-    const firm = {id: v.id || uid('f'), name: t(v.name), eik: t(v.eik).replace(/\D/g, ''), contact: t(v.contact), channel: v.channel, address: t(v.address), auto: v.auto === 'on'};
+    const firm = {id: v.id || uid('f'), name: t(v.name), eik: t(v.eik).replace(/\D/g, ''), contact: t(v.contact), channel: v.channel, address: t(v.address), auto: v.auto === 'on', stats: v.stats === 'on'};
     if (!firm.name) return;
     S.editing = null; S.firm = firm.id; pref('firm', firm.id); render(); await saveFirm(firm); return render();
   }

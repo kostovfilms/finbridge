@@ -1,56 +1,78 @@
 <!DOCTYPE html>
 <html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Документи за счетоводството</title>
 <style>
-:root{--bg:#f1f4f5;--surface:#fff;--line:#d3dbdd;--ink:#16252a;--muted:#5b6d73;--accent:#0e6b74;--accent-ink:#fff;--good:#1d7a46;--crit:#b3261e}
-@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#0f1719;--surface:#172124;--line:#2f4045;--ink:#e4ecee;--muted:#93a6ab;--accent:#4fc0c9;--accent-ink:#06262a;--good:#6fd39a;--crit:#ff8f87}}
+:root{--bg:#f1f4f5;--surface:#fff;--soft:#e8edee;--line:#d3dbdd;--ink:#16252a;--muted:#5b6d73;--accent:#0e6b74;--accent-ink:#fff;--good:#1d7a46;--crit:#b3261e;--warn:#9a5b00;--warn-soft:#fbecd0}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#0f1719;--surface:#172124;--soft:#1f2c30;--line:#2f4045;--ink:#e4ecee;--muted:#93a6ab;--accent:#4fc0c9;--accent-ink:#06262a;--good:#6fd39a;--crit:#ff8f87;--warn:#f0b65a;--warn-soft:#40300f}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Segoe UI",Arial,sans-serif;padding:24px 16px}
-main{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:16px}h1{font-size:22px;margin:0;line-height:1.25}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px}ul{margin:8px 0 0;padding-left:20px}li{margin:4px 0;overflow-wrap:anywhere}p{margin:0}
-.pick{display:block;text-align:center;font-weight:600;border-radius:10px;padding:14px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
-input[type=file]{position:absolute;width:1px;height:1px;opacity:0}input[type=text]{width:100%;font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:9px 10px;margin-top:10px}
-.nodoc,.sendnote{font:inherit;font-size:14px;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:8px;padding:3px 9px;cursor:pointer;margin-left:6px}.reply{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}.reply input{flex:1;min-width:180px;margin-top:0}#log{list-style:none;padding:0;margin:0}#log li{padding:6px 0;border-top:1px solid var(--line)}.ok{color:var(--good)}.no{color:var(--crit)}.dim{color:var(--muted);font-size:14px}
-input:focus-visible + .pick,:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+main{max-width:560px;margin:0 auto;display:flex;flex-direction:column;gap:16px}h1{font-size:22px;margin:0;line-height:1.25}h2{font-size:16px;margin:0 0 8px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px}p{margin:0 0 8px}p:last-child{margin-bottom:0}
+ul.plain{list-style:none;margin:8px 0 0;padding:0}ul.plain li{padding:10px 0;border-top:1px solid var(--line);overflow-wrap:anywhere}ul.plain li:first-child{border-top:0;padding-top:0}
+.bar{height:8px;background:var(--soft);border-radius:5px;overflow:hidden;margin:8px 0}.bar i{display:block;height:100%;background:var(--good)}
+.warn{background:var(--warn-soft);color:var(--warn);border-radius:8px;padding:8px 10px;font-size:14.5px}
+.pick{display:block;text-align:center;font-weight:600;border-radius:10px;padding:13px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
+.pick.alt{background:var(--surface);color:var(--ink);border:1px solid var(--line)}.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+input[type=file]{position:absolute;width:1px;height:1px;opacity:0}
+input[type=text],select{width:100%;font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:9px 10px;margin-top:10px}
+button{font:inherit;font-size:14px;border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:8px;padding:5px 10px;cursor:pointer}
+.acts{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}.reply{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}.reply input{flex:1;min-width:180px;margin-top:0}
+table{width:100%;border-collapse:collapse;font-size:15px}td,th{padding:5px 0;border-top:1px solid var(--line);text-align:left;overflow-wrap:anywhere}tr:first-child td,tr:first-child th{border-top:0}.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+#log{list-style:none;padding:0;margin:0}#log li{padding:6px 0;border-top:1px solid var(--line)}.ok{color:var(--good)}.no{color:var(--crit)}.dim{color:var(--muted);font-size:14px}
+:focus-visible,input[type=file]:focus-visible + .pick{outline:2px solid var(--accent);outline-offset:2px}
 </style></head><body><main>
 <h1>Документи за {{FIRM}}</h1>
-<div class="card">{{LIST}}</div>
-<div class="card">
-  <input type="file" id="files" multiple accept="image/*,application/pdf,.pdf"><label class="pick" for="files">Снимай или избери фактури</label>
+{{CARDS}}
+<!--UPLOAD--><section class="card" id="upload">
+  <h2>Качване на документи</h2>
+  <div class="two">
+    <div><input type="file" id="camera" accept="image/*" capture="environment"><label class="pick" for="camera">Снимай</label></div>
+    <div><input type="file" id="files" multiple><label class="pick alt" for="files">Избери файл</label></div>
+  </div>
+  <select id="kind" aria-label="Вид на документите"><option value="invoice">Фактури и касови бонове</option><option value="statement">Банково извлечение</option><option value="contract">Договор</option><option value="other">Друг документ</option></select>
   <input type="text" id="note" maxlength="300" placeholder="Бележка към счетоводителя (по желание)" aria-label="Бележка към счетоводителя">
-  <p class="dim" style="margin-top:10px">Приемат се снимки и PDF до 15 MB. Файловете отиват направо при счетоводителя ви.</p>
-</div>
-<ul id="log" aria-live="polite"></ul>
+  <p class="dim" style="margin-top:10px">Снимки и PDF до 15 MB; за извлечение и CSV, Excel, MT940 или XML. Файловете отиват направо при счетоводителя ви.</p>
+  <ul id="log" aria-live="polite"></ul>
+</section><!--/UPLOAD-->
+<input type="file" id="forpay" accept="image/*,application/pdf,.pdf">
 </main>
 <script>
-const log = document.getElementById('log');
-document.addEventListener('click', async e => {
-  const b = e.target.closest('button.nodoc, button.sendnote'); if (!b) return;
-  const li = b.closest('li');
-  if (b.classList.contains('nodoc')){
-    b.remove();
-    const box = document.createElement('div'); box.className = 'reply';
-    box.innerHTML = '<input type="text" maxlength="300" placeholder="Какво е това плащане? Напр. лично, без фактура" aria-label="Обяснение за плащането"><button type="button" class="sendnote">Изпрати</button>';
-    li.appendChild(box); box.firstChild.focus(); return;
-  }
-  const input = li.querySelector('input'), box = li.querySelector('.reply');
-  b.disabled = true;
-  try {
-    const r = await fetch(location.pathname + '/reply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ period: li.dataset.period, tx: li.dataset.tx, note: input.value }) });
-    if (r.ok){ box.innerHTML = '<span class="ok">Изпратено на счетоводителя.</span>'; return; }
-    let err = box.querySelector('.no'); if (!err){ err = document.createElement('div'); err.className = 'no'; box.appendChild(err); }
-    err.textContent = (await r.json().catch(() => ({}))).message || 'Не беше изпратено.';
-  } catch (x) { alertless(box); }
-  b.disabled = false;
-});
-function alertless(box){ let err = box.querySelector('.no'); if (!err){ err = document.createElement('div'); err.className = 'no'; box.appendChild(err); } err.textContent = 'Няма връзка, опитайте пак.'; }
-document.getElementById('files').onchange = async e => {
-  const files = [...e.target.files]; e.target.value = '';
+const $ = id => document.getElementById(id), log = $('log');
+async function upload(files, extra){
   for (const f of files){
     const li = document.createElement('li'); li.textContent = f.name + ': качва се…'; log.prepend(li);
+    const qs = new URLSearchParams(Object.assign({ name: f.name, note: $('note').value, kind: $('kind').value }, extra));
     try {
-      const r = await fetch(location.pathname + '/upload?name=' + encodeURIComponent(f.name) + '&note=' + encodeURIComponent(document.getElementById('note').value), { method: 'POST', body: f });
+      const r = await fetch(location.pathname + '/upload?' + qs, { method: 'POST', body: f });
       if (r.ok){ li.textContent = f.name + ': получен'; li.className = 'ok'; }
       else { li.textContent = f.name + ': ' + ((await r.json().catch(() => ({}))).message || 'не беше приет'); li.className = 'no'; }
     } catch (x) { li.textContent = f.name + ': няма връзка, опитайте пак'; li.className = 'no'; }
   }
-};
+}
+let target = null;
+$('files').onchange = e => { const fs = [...e.target.files]; e.target.value = ''; upload(fs); };
+$('camera').onchange = e => { const fs = [...e.target.files]; e.target.value = ''; upload(fs, { kind: 'invoice' }); };
+$('forpay').onchange = async e => { const fs = [...e.target.files]; e.target.value = ''; if (!target || !fs.length) return;
+  const li = target; await upload(fs, { kind: 'invoice', tx: li.dataset.tx, period: li.dataset.period });
+  const a = li.querySelector('.acts'); if (a && log.firstChild && log.firstChild.className === 'ok') a.innerHTML = '<span class="ok">Документът е изпратен.</span>'; };
+function fail(box, text){ let err = box.querySelector('.no'); if (!err){ err = document.createElement('div'); err.className = 'no'; err.style.flexBasis = '100%'; box.appendChild(err); } err.textContent = text; }
+async function post(path, body, box, btn){
+  btn.disabled = true;
+  try {
+    const r = await fetch(location.pathname + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    if (r.ok){ box.innerHTML = '<span class="ok">Изпратено на счетоводителя.</span>'; return; }
+    fail(box, (await r.json().catch(() => ({}))).message || 'Не беше изпратено.');
+  } catch (x) { fail(box, 'Няма връзка, опитайте пак.'); }
+  btn.disabled = false;
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const li = b.closest('li');
+  if (b.classList.contains('forpay')){ target = li; $('forpay').click(); }
+  else if (b.classList.contains('nodoc')){
+    const box = b.closest('.acts'); box.className = 'reply';
+    box.innerHTML = '<input type="text" maxlength="300" placeholder="Какво е това плащане? Напр. лично, без фактура" aria-label="Обяснение за плащането"><button type="button" class="sendnote">Изпрати</button>';
+    box.firstChild.focus();
+  }
+  else if (b.classList.contains('sendnote')) post('/reply', { period: li.dataset.period, tx: li.dataset.tx, note: li.querySelector('input').value }, li.querySelector('.reply'), b);
+  else if (b.classList.contains('answer')) post('/answer', { id: li.dataset.q, text: li.querySelector('input').value }, li.querySelector('.reply'), b);
+});
 </script></body></html>
