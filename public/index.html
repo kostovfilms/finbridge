@@ -433,7 +433,7 @@ const Core = (() => {
       supplier: s(raw.supplier), supplierEik: s(raw.supplierEik).replace(/\D/g, ''), supplierVat: s(raw.supplierVat),
       number: s(raw.number), date: parseDate(raw.date), currency: s(raw.currency).toUpperCase().slice(0, 3),
       base: parseAmount(raw.base), vat: parseAmount(raw.vat), total: parseAmount(raw.total),
-      lines: [], notes: s(raw.notes), issues: []
+      lines: [], notes: s(raw.notes), issues: [], warnings: [], category: CATS[raw.category] !== undefined ? raw.category : '', subject: s(raw.subject).slice(0, 80)
     };
     for (const l of Array.isArray(raw.lines) ? raw.lines.slice(0, 200) : []){
       if (!l || typeof l !== 'object') continue;
@@ -453,8 +453,50 @@ const Core = (() => {
     if (d.docType === 'proforma') d.issues.push('Проформа, не е данъчен документ');
     let c = typeof raw.confidence === 'number' && raw.confidence >= 0 && raw.confidence <= 1 ? raw.confidence : 0.85;
     if (d.issues.length) c = Math.min(c, 0.6);
+    if (d.supplierEik && !eikValid(d.supplierEik)) d.warnings.push('ЕИК на доставчика не минава проверката за контролна цифра. Сверете го с документа.');
+    if (d.base > 0 && d.vat > 0){ const rate = d.vat / d.base * 100; if (Math.abs(rate - 20) > 0.6 && Math.abs(rate - 9) > 0.6) d.warnings.push('Необичайна ставка на ДДС: ' + rate.toFixed(1).replace('.', ',') + '%. Възможно е документът да е със смесени ставки.'); }
     d.confidence = r2(c);
     return d;
+  }
+
+  /* Контиране: правило за доставчика -> предложение по вид на доставката */
+  const CATS = {materials: '601', services: '602', goods: '304', fuel: '601', asset: '', other: '609'};
+  const CAT_LABEL = {materials: 'материали', services: 'външни услуги', goods: 'стоки', fuel: 'гориво', asset: 'дълготраен актив', other: 'други разходи'};
+  const ACCOUNTS = [['601', 'Разходи за материали'], ['602', 'Разходи за външни услуги'], ['609', 'Други разходи'], ['302', 'Материали'], ['304', 'Стоки']];
+  const VATM = {full: 'пълен', none: 'без право', partial: 'частичен'};
+  const supplierKey = d => { const e = String(d.supplierEik || '').replace(/\D/g, ''); return e.length >= 9 ? e : 'n:' + nameTokens(d.supplier).sort().join(' '); };
+  const cpKey = s => nameTokens(s).sort().join(' ');
+  function codingFor(d, rules){
+    const r = rules && rules.sup && rules.sup[supplierKey(d)];
+    if (r && r.acc) return {acc: r.acc, vatMode: VATM[r.vatMode] ? r.vatMode : 'full', accSrc: 'rule'};
+    if (d.category && CATS[d.category]) return {acc: CATS[d.category], vatMode: 'full', accSrc: 'ai'};
+    return {acc: '', vatMode: 'full', accSrc: ''};
+  }
+  /* Едно плащане за няколко фактури от същия доставчик: търси единствена комбинация с точна сума. */
+  function findGroup(tx, docs){
+    if (!(tx.amount < 0) || tx.docId) return null;
+    const text = tx.cp + ' ' + tx.desc, target = Math.round(Math.abs(tx.amount) * 100);
+    const c = docs.filter(d => { if (d.txId || !(d.total > 0) || !docOk(d) || Math.round(d.total * 100) >= target || nameSim(d.supplier, text) < 0.5) return false;
+      if (!d.date) return true; const diff = dayDiff(tx.date, d.date); return diff >= -15 && diff <= 120; }).slice(0, 14);
+    if (c.length < 2) return null;
+    const cents = c.map(d => Math.round(d.total * 100)); let found = null, count = 0;
+    (function rec(i, sum, pick){
+      if (count > 1) return;
+      if (sum === target){ if (pick.length >= 2){ count++; found = pick.slice(); } return; }
+      if (i >= c.length || sum > target) return;
+      rec(i + 1, sum + cents[i], pick.concat(i)); rec(i + 1, sum, pick);
+    })(0, 0, []);
+    return count === 1 ? found.map(i => c[i]) : null;
+  }
+  function exportLedger(P, dec){
+    const rows = [['№', 'Вид', 'Номер', 'Дата', 'ДДС номер или ЕИК', 'Доставчик', 'Предмет', 'ДО с право на данъчен кредит', 'ДДС с право на данъчен кредит', 'ДО и ДДС без право на данъчен кредит', 'Данъчен кредит', 'Сметка']];
+    let i = 0;
+    for (const d of P.docs.filter(d => d.docType === 'invoice' || d.docType === 'credit_note').sort((a, b) => (a.date || '').localeCompare(b.date || ''))){
+      const none = d.vatMode === 'none';
+      rows.push([++i, TYPES[d.docType], d.number, fd(d.date), d.supplierVat || d.supplierEik, d.supplier, d.subject || (d.lines && d.lines[0] ? d.lines[0].name : ''),
+        none ? '' : num(d.base, dec), none ? '' : num(d.vat, dec), none ? num(d.total, dec) : '', VATM[d.vatMode || 'full'], d.acc || '']);
+    }
+    return csv(rows);
   }
 
   const MONTHS = ['януари','февруари','март','април','май','юни','юли','август','септември','октомври','ноември','декември'];
@@ -478,19 +520,47 @@ const Core = (() => {
       (firm.portal ? '\nМожете да ги качите направо тук: ' + firm.portal : '') + '\nБлагодаря!';
   }
 
-  function csv(rows){
-    return rows.map(r => r.map(v => { const s = v == null ? '' : String(v); return /[";\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(';')).join('\r\n');
+  function csv(rows, delim){
+    delim = delim || ';';
+    return rows.map(r => r.map(v => { const s = v == null ? '' : String(v); return s.includes('"') || s.includes(delim) || /[\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(delim)).join('\r\n');
   }
   const num = (n, dec) => n == null ? '' : n.toFixed(2).replace('.', dec || ',');
-  function exportDocs(P, dec){
+  const COLS = [
+    ['docDate', 'Дата на документа', (d, t, o) => o.fd(d.date)], ['type', 'Вид', d => TYPES[d.docType] || ''], ['number', 'Номер', d => d.number], ['supplier', 'Доставчик', d => d.supplier],
+    ['eik', 'ЕИК', d => d.supplierEik], ['vatno', 'ДДС номер', d => d.supplierVat], ['base', 'Данъчна основа', (d, t, o) => num(d.base, o.dec)], ['vat', 'ДДС', (d, t, o) => num(d.vat, o.dec)],
+    ['total', 'Общо', (d, t, o) => num(d.total, o.dec)], ['currency', 'Валута', d => d.currency], ['payDate', 'Дата на плащане', (d, t, o) => t ? o.fd(t.date) : ''],
+    ['paid', 'Платена сума', (d, t, o) => t ? num(Math.abs(t.amount), o.dec) : ''], ['payDesc', 'Основание на плащането', (d, t) => t ? t.desc : ''],
+    ['status', 'Статус', (d, t) => t ? 'Платен по банка' : d.suggestTx ? 'За преглед' : 'Без плащане в банката'],
+    ['firstLine', 'Описание (първи ред)', d => d.lines && d.lines[0] ? d.lines[0].name : ''], ['file', 'Име на файла', d => d.file || ''],
+    ['acc', 'Дебит сметка', d => d.acc || ''], ['credit', 'Кредит сметка', d => d.acc ? '401' : ''], ['vatMode', 'Данъчен кредит', d => VATM[d.vatMode || 'full']],
+    ['subject', 'Предмет', d => d.subject || (d.lines && d.lines[0] ? d.lines[0].name : '')]];
+  const DEFAULT_COLS = COLS.slice(0, 14).map(c => c[0]);
+  function exportDocs(P, dec, cfg){
+    cfg = cfg || {};
+    const o = {dec: dec || ',', fd: cfg.date === 'iso' ? (x => x || '') : fd};
+    const cols = (cfg.cols && cfg.cols.length ? cfg.cols : DEFAULT_COLS).map(k => COLS.find(c => c[0] === k)).filter(Boolean);
     const tx = id => P.txs.find(t => t.id === id);
-    const rows = [['Дата на документа','Вид','Номер','Доставчик','ЕИК','ДДС номер','Данъчна основа','ДДС','Общо','Валута','Дата на плащане','Платена сума','Основание на плащането','Статус']];
+    const rows = cfg.header === false ? [] : [cols.map(c => c[1])];
     for (const d of P.docs.slice().sort((a, b) => (a.date || '').localeCompare(b.date || ''))){
       const t = d.txId ? tx(d.txId) : null;
-      rows.push([fd(d.date), TYPES[d.docType] || '', d.number, d.supplier, d.supplierEik, d.supplierVat, num(d.base, dec), num(d.vat, dec), num(d.total, dec), d.currency,
-        t ? fd(t.date) : '', t ? num(Math.abs(t.amount), dec) : '', t ? t.desc : '', t ? 'Платен по банка' : d.suggestTx ? 'За преглед' : 'Без плащане в банката']);
+      rows.push(cols.map(c => c[2](d, t, o)));
     }
-    return csv(rows);
+    return csv(rows, cfg.delim === 'tab' ? '\t' : cfg.delim);
+  }
+  const W1251 = {0x401: 0xA8, 0x451: 0xB8, 0x2116: 0xB9, 0xA0: 0xA0, 0x20AC: 0x88, 0x201E: 0x84, 0x201C: 0x93, 0x201D: 0x94, 0x2013: 0x96, 0x2014: 0x97, 0xAB: 0xAB, 0xBB: 0xBB, 0xB0: 0xB0};
+  function encode1251(s){
+    const out = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++){ const c = s.charCodeAt(i); out[i] = c < 128 ? c : c >= 0x410 && c <= 0x44F ? c - 0x350 : W1251[c] || 63; }
+    return out;
+  }
+  function eikValid(e){
+    const d = String(e || '').replace(/\D/g, '').split('').map(Number);
+    const mod = (from, n, w1, w2) => { let s = 0; for (let i = 0; i < n; i++) s += d[from + i] * w1[i]; let r = s % 11;
+      if (r === 10){ s = 0; for (let i = 0; i < n; i++) s += d[from + i] * w2[i]; r = s % 11; if (r === 10) r = 0; } return r; };
+    if (d.length === 10) return true;
+    if (d.length !== 9 && d.length !== 13) return false;
+    if (mod(0, 8, [1,2,3,4,5,6,7,8], [3,4,5,6,7,8,9,10]) !== d[8]) return false;
+    return d.length === 9 || mod(8, 4, [2,7,3,5], [4,9,5,7]) === d[12];
   }
   function exportLines(P, dec){
     const rows = [['Номер на документ','Дата','Доставчик','ЕИК','Ред','Описание','Количество','Мярка','Ед. цена','Стойност']];
@@ -504,7 +574,7 @@ const Core = (() => {
   }
 
   return {r2, parseAmount, parseDate, splitCSV, parseTable, parseMT940, parseCamt, parseStatement, classify, withKeys, nameSim, nameTokens,
-    findMatches, decideMatch, docOk, validateDoc, TYPES, periodLabel, shiftPeriod, deadline, cur, fd, money, reminderText, exportDocs, exportLines, exportMissing, dayDiff};
+    findMatches, decideMatch, docOk, validateDoc, CATS, CAT_LABEL, ACCOUNTS, VATM, supplierKey, cpKey, codingFor, findGroup, exportLedger, eikValid, encode1251, COLS, DEFAULT_COLS, TYPES, periodLabel, shiftPeriod, deadline, cur, fd, money, reminderText, exportDocs, exportLines, exportMissing, dayDiff};
 })();
 /*CORE-END*/
 
@@ -518,7 +588,7 @@ const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
 function pref(k, v){ try { if (v === undefined) return localStorage.getItem('fb.' + k); localStorage.setItem('fb.' + k, v); } catch (e) {} return null; }
 
 const S = {period: pref('period') || Core.shiftPeriod(todayISO().slice(0, 7), -1), firm: pref('firm'), doc: null, mode: 'boot', firms: [], firmsReady: false,
-  editing: null, imp: null, upl: null, onlyMissing: false, exp: 'docs', dec: ',', toast: null, slow: false, busy: null, rem: {}, stale: false, inbox: []};
+  editing: null, imp: null, upl: null, onlyMissing: false, exp: 'docs', dec: ',', toast: null, slow: false, busy: null, rem: {}, stale: false, inbox: [], replies: [], questions: [], users: null, rules: {sup: {}, cp: {}}, ecfg: (() => { try { return JSON.parse(pref('ecfg') || '{}') || {}; } catch (e) { return {}; } })()};
 if (!/^\d{4}-\d{2}$/.test(S.period)) S.period = Core.shiftPeriod(todayISO().slice(0, 7), -1);
 const ALL = {}, pend = {}, chain = {};
 let db = null, sample = null, downloads = null, imgOK = false, unsubP = null;
@@ -526,7 +596,7 @@ const EMPTY = Object.freeze({txs: [], docs: [], reminders: []});
 const key = (f, p) => f + '_' + p;
 const P = (f, p) => ALL[key(f || S.firm, p || S.period)] || EMPTY;
 function ensureP(f, p){ const k = key(f, p); if (!ALL[k]) ALL[k] = {firm: f, period: p, txs: [], docs: [], reminders: []}; return ALL[k]; }
-function fill(v){ v.txs = v.txs || []; v.docs = v.docs || []; v.reminders = v.reminders || []; v.docs.forEach(d => { d.lines = d.lines || []; d.issues = d.issues || []; }); return v; }
+function fill(v){ v.txs = v.txs || []; v.docs = v.docs || []; v.reminders = v.reminders || []; v.docs.forEach(d => { d.lines = d.lines || []; d.issues = d.issues || []; d.warnings = d.warnings || []; }); return v; }
 async function loadP(f, p){
   const k = key(f, p);
   if (!ALL[k] && db){
@@ -570,8 +640,9 @@ async function boot(){
   if (sample){ try { const l = await sample.limits(); imgOK = !!(l && l.images); } catch (e) { imgOK = false; } }
   if (u){ try { S.canEdit = await u.canEdit(); } catch (e) {} }
   if (!d){ S.mode = 'mem'; S.firmsReady = S.periodReady = true; return render(); }
-  db = d; S.mode = 'db';
-  if (window.FB){ const pull = async () => { try { const l = await FB.inbox(); if (JSON.stringify(l) !== JSON.stringify(S.inbox)){ S.inbox = l; softRender(); } } catch (e) {} }; pull(); setInterval(pull, 15000); }
+  db = d; S.mode = 'db'; loadOffice();
+  db.doc('settings/rules').get().then(x => { if (x.exists){ const v = clone(x.data()); S.rules = {sup: v.sup || {}, cp: v.cp || {}}; softRender(); } }).catch(() => {});
+  if (window.FB){ const pull = async () => { try { const [l, r, qq] = await Promise.all([FB.inbox(), FB.replies(), FB.questions()]); if (JSON.stringify([l, r, qq]) !== JSON.stringify([S.inbox, S.replies, S.questions])){ S.inbox = l; S.replies = r; S.questions = qq; softRender(); } } catch (e) {} }; pull(); setInterval(pull, 15000); }
   const timer = setTimeout(() => { if (!S.firmsReady){ S.slow = true; softRender(); } }, 10000);
   db.collection('firms').onSnapshot(snap => {
     clearTimeout(timer);
@@ -582,16 +653,20 @@ async function boot(){
   }, e => { clearTimeout(timer); S.firmsReady = true; S.toast = {cls: 'crit', text: 'Фирмите не можаха да се заредят (' + (e && e.code) + ').'}; softRender(); });
   subPeriod();
 }
-function softRender(){ if (S.editing || isTyping()) { S.stale = true; return; } render(); }
+function softRender(){ if (S.editing || isTyping() || view() === 'office') { S.stale = true; return; } render(); }
 function isTyping(){ const a = document.activeElement; return !!(a && a.closest && a.closest('#main') && /^(INPUT|TEXTAREA)$/.test(a.tagName) && a.type !== 'file'); }
 
 /* ---------- Операции ---------- */
 const firmById = id => S.firms.find(f => f.id === id);
 const curFirm = () => firmById(S.firm) || S.firms[0] || null;
 const missing = p => p.txs.filter(t => t.needsDoc && !t.docId);
+const toAsk = p => missing(p).filter(t => !suggested(p, t) && !S.replies.some(r => r.firm === p.firm && r.period === p.period && r.tx === t.id));
 const suggested = (p, t) => p.docs.find(d => d.suggestTx === t.id && !d.txId);
-function link(p, doc, tx){ doc.txId = tx.id; doc.suggestTx = null; tx.docId = doc.id; tx.needsDoc = true; }
-function unlink(p, doc){ const t = p.txs.find(x => x.id === doc.txId); if (t) t.docId = null; doc.txId = null; doc.suggestTx = null; }
+const docsOf = (p, t) => p.docs.filter(d => d.txId === t.id);
+function link(p, doc, tx){ doc.txId = tx.id; doc.suggestTx = null; if (!tx.docId) tx.docId = doc.id; tx.needsDoc = true; }
+function unlink(p, doc){ const t = p.txs.find(x => x.id === doc.txId); doc.txId = null; doc.suggestTx = null; if (t){ const rest = docsOf(p, t); t.docId = rest.length ? rest[0].id : null; } }
+function applyCoding(d){ if (d.accSrc !== 'manual') Object.assign(d, Core.codingFor(d, S.rules)); return d; }
+function saveRules(){ if (db) db.doc('settings/rules').set(clone(S.rules)).catch(fail); }
 function autoMatch(p){
   let n = 0;
   for (const d of p.docs){
@@ -599,14 +674,18 @@ function autoMatch(p){
     const taken = new Set(p.docs.filter(x => x !== d && x.suggestTx).map(x => x.suggestTx));
     const r = Core.decideMatch(d, p.txs.filter(t => !taken.has(t.id)));
     if (r.tx && r.auto){ link(p, d, r.tx); n++; }
-    else d.suggestTx = r.tx ? r.tx.id : null;
+    else d.suggestTx = r.tx ? r.tx.id : (d.hintTx && p.txs.some(t => t.id === d.hintTx && !t.docId && !taken.has(t.id)) ? d.hintTx : null);
+  }
+  for (const t of p.txs){
+    const g = Core.findGroup(t, p.docs.filter(d => !d.suggestTx || d.suggestTx === t.id));
+    if (g){ g.forEach(d => link(p, d, t)); n += g.length; }
   }
   return n;
 }
 async function saveFirm(f){
   const i = S.firms.findIndex(x => x.id === f.id);
   if (i >= 0) S.firms[i] = f; else S.firms.push(f);
-  if (db){ const data = clone(f); delete data.id; delete data.portal; try { await db.collection('firms').doc(f.id).set(data); } catch (e) { fail(e); } }
+  if (db){ const data = clone(f); delete data.id; delete data.portal; delete data.lastAuto; try { await db.collection('firms').doc(f.id).set(data); } catch (e) { fail(e); } }
 }
 async function deleteFirm(id){
   S.firms = S.firms.filter(f => f.id !== id);
@@ -710,7 +789,7 @@ const STMT_PROMPT = 'Това е текст от банково извлечен
 const INV_PROMPT = 'Извлечи данните от този счетоводен документ (фактура, кредитно известие, касов бон или проформа), най-често на български. Върни САМО един JSON обект с полетата: ' +
   '{"docType":"invoice|credit_note|receipt|proforma|other","supplier":"име на издателя (доставчика)","supplierEik":"ЕИК/Булстат на доставчика, само цифри","supplierVat":"ДДС номер на доставчика","recipientEik":"ЕИК на получателя, само цифри",' +
   '"number":"номер на документа","date":"YYYY-MM-DD","currency":"EUR или BGN или друга","base":данъчна основа,"vat":ДДС,"total":сума за плащане с ДДС,' +
-  '"lines":[{"name":"описание","qty":количество,"unit":"мярка","price":единична цена без ДДС,"amount":стойност без ДДС}],"confidence":число от 0 до 1 за увереността ти в сумите и номера,"notes":"кратка бележка, ако нещо е нечетливо или съмнително"}. ' +
+  '"lines":[{"name":"описание","qty":количество,"unit":"мярка","price":единична цена без ДДС,"amount":стойност без ДДС}],"category":"materials|services|goods|fuel|asset|other според вида на доставката","subject":"предмет на доставката с до 60 знака","confidence":число от 0 до 1 за увереността ти в сумите и номера,"notes":"кратка бележка, ако нещо е нечетливо или съмнително"}. ' +
   'Числата са с десетична точка, без интервали и без валута. Ако поле липсва или не се чете, сложи null и намали confidence. Не измисляй стойности.';
 function aiMsg(e){
   const c = e && e.code;
@@ -760,6 +839,7 @@ async function onStatement(file){
 }
 async function confirmImport(){
   const imp = S.imp; S.imp = null;
+  if (imp.inboxId && window.FB){ S.inbox = S.inbox.filter(x => x.id !== imp.inboxId); FB.done(imp.inboxId).catch(() => {}); }
   const by = {};
   for (const t of Core.withKeys(imp.txs)) (by[t.date.slice(0, 7)] = by[t.date.slice(0, 7)] || []).push(t);
   let added = 0, dup = 0, matched = 0, other = 0;
@@ -767,8 +847,8 @@ async function confirmImport(){
     const p = await loadP(imp.firm, per), have = new Set(p.txs.map(t => t.key));
     for (const t of by[per]){
       if (have.has(t.key)){ dup++; continue; }
-      const c = Core.classify(t);
-      p.txs.push({id: uid('t'), key: t.key, date: t.date, cp: t.cp, desc: t.desc, ref: t.ref, amount: t.amount, kind: c.kind, needsDoc: c.needsDoc, docId: null, reminded: null});
+      const c = Core.classify(t), byRule = t.amount < 0 && !!S.rules.cp[Core.cpKey(t.cp)];
+      p.txs.push(Object.assign({id: uid('t'), key: t.key, date: t.date, cp: t.cp, desc: t.desc, ref: t.ref, amount: t.amount, kind: c.kind, needsDoc: c.needsDoc && !byRule, docId: null, reminded: null}, byRule ? {note: 'по правило за контрагента'} : {}));
       added++; if (per !== S.period) other++;
     }
     p.txs.sort((a, b) => a.date.localeCompare(b.date));
@@ -814,9 +894,9 @@ async function onDocs(files){
       d.issues = [err ? 'Не беше разчетен автоматично: ' + err : 'Автоматичното разчитане не е достъпно. Въведете данните ръчно.'];
       S.upl.errors.push(f.name);
     }
-    Object.assign(d, {id: uid('d'), file: f.name, source: item.inboxId ? 'От клиента' : 'Качен файл', ai: true, fileId, received: todayISO(), txId: null, suggestTx: null});
+    Object.assign(d, {id: uid('d'), file: f.name, source: item.inboxId ? 'От клиента' : 'Качен файл', ai: true, fileId, hintTx: item.tx || null, received: todayISO(), txId: null, suggestTx: null});
     if (item.inboxId){ try { await FB.done(item.inboxId); } catch (e) {} S.inbox = S.inbox.filter(x => x.id !== item.inboxId); }
-    p.docs.unshift(d);
+    applyCoding(d); p.docs.unshift(d);
     S.upl.linked += autoMatch(p);
     S.upl.done++; S.doc = d.id;
     save(firm.id, per);
@@ -830,6 +910,8 @@ async function onDocs(files){
 
 /* ---------- Изгледи ---------- */
 const VIEWS = [['clients','Клиенти'],['reconcile','Засичане'],['inbox','Документи'],['reminders','Напомняния'],['export','Експорт']];
+VIEWS.push(['rules', 'Правила']);
+if (window.FB) VIEWS.push(['office', 'Кантора']);
 function view(){ const h = location.hash.slice(1); return VIEWS.some(v => v[0] === h) ? h : 'clients'; }
 const M = n => Core.money(n);
 const D = d => Core.fd(d).slice(0, 5);
@@ -858,7 +940,10 @@ function firmForm(f){
     '<label>ЕИК<input type="text" id="firm-eik" name="eik" inputmode="numeric" value="' + esc(f.eik || '') + '"></label>' +
     '<label>Лице за контакт<input type="text" id="firm-contact" name="contact" value="' + esc(f.contact || '') + '"></label>' +
     '<label>Канал за напомняния<select id="firm-channel" name="channel">' + ['Viber','Имейл','Телефон'].map(c => '<option' + (f.channel === c ? ' selected' : '') + '>' + c + '</option>').join('') + '</select></label>' +
-    '<label>Имейл или телефон<input type="text" id="firm-address" name="address" value="' + esc(f.address || '') + '"></label></div>' +
+    '<label>Имейл или телефон<input type="text" id="firm-address" name="address" value="' + esc(f.address || '') + '"></label>' +
+    (window.FB && (FB.me || {}).mail ? '<label class="full" style="flex-direction:row;align-items:center;gap:8px;color:var(--ink);font-size:14px"><input type="checkbox" id="firm-auto" name="auto" style="width:auto"' + (f.auto ? ' checked' : '') + '> Автоматично напомняне по имейл на всеки ' + plural(FB.me.remindDays || 3, 'ден', 'дни') + ', докато има липсващи документи за приключен месец</label>' : '') +
+    (window.FB ? '<label class="full" style="flex-direction:row;align-items:center;gap:8px;color:var(--ink);font-size:14px"><input type="checkbox" id="firm-stats" name="stats" style="width:auto"' + (f.stats ? ' checked' : '') + '> Показвай на клиента обобщение на разходите и постъпленията в страницата му</label>' : '') + '</div>' +
+    (window.FB && f.portal ? '<div class="note info">Финансово управление за фирмата: разходи с одобрение, плащания, вземания, бюджети и прогноза. <a id="fin-link" href="/company?firm=' + encodeURIComponent(f.id) + '">Отвори финансите и дай достъп на фирмата</a></div>' : '') +
     (f.portal ? '<div class="note info">Връзка за качване от клиента: <span id="portal-url">' + esc(f.portal) + '</span> <button class="btn small" type="button" data-act="copy-portal" data-id="' + f.id + '">' + (S.copied === 'portal' ? 'Копирано' : 'Копирай') + '</button> ' +
       '<button class="btn small quiet" type="button" data-act="reset-portal" data-id="' + f.id + '">' + (S.confirm === 'portal' + f.id ? 'Старата връзка ще спре да работи. Потвърди' : 'Нова връзка') + '</button></div>' : '') +
     '<div class="tools"><button class="btn primary" type="submit">Запази</button><button class="btn" type="button" data-act="cancel">Отказ</button>' +
@@ -871,12 +956,13 @@ function vClients(){
   const rows = S.firms.map(f => {
     const p = P(f.id), n = p.txs.filter(t => t.needsDoc), m = n.filter(t => t.docId).length, x = n.length - m, rev = p.docs.filter(d => d.suggestTx && !d.txId).length;
     need += n.length; ok += m; miss += x; if (x) firms++; missSum += missing(p).reduce((s, t) => s + Math.abs(t.amount), 0);
-    const st = !p.txs.length ? '<span class="pill none">Няма извлечение</span>' : x ? '<span class="pill miss">Чака ' + plural(x, 'документ', 'документа') + '</span>' : '<span class="pill ok">Готова за експорт</span>';
+    const st = p.closed ? '<span class="pill ok">Приключен</span>' : !p.txs.length ? '<span class="pill none">Няма извлечение</span>' : x ? '<span class="pill miss">Чака ' + plural(x, 'документ', 'документа') + '</span>' : '<span class="pill ok">Готова за експорт</span>';
     return '<tr class="click ' + (!p.txs.length ? '' : x ? 's-miss' : 's-ok') + '" data-act="open" data-id="' + f.id + '" tabindex="0">' +
       '<td class="wrap"><strong>' + esc(f.name) + '</strong><div class="dim">' + (f.eik ? 'ЕИК ' + esc(f.eik) : 'без ЕИК') + '</div></td>' +
       '<td class="wrap">' + esc(f.contact || '') + ' <span class="chip">' + esc(f.channel || 'Viber') + '</span></td>' +
       '<td><div class="bar"><i style="width:' + (n.length ? Math.round(m / n.length * 100) : 0) + '%"></i></div><div class="dim">' + m + ' от ' + n.length + ' плащания с документ</div></td>' +
-      '<td>' + st + (rev ? ' <span class="pill rev">' + rev + ' за преглед</span>' : '') + (S.inbox.some(x => x.firm === f.id) ? ' <span class="pill rev">' + plural(S.inbox.filter(x => x.firm === f.id).length, 'нов файл', 'нови файла') + '</span>' : '') + '</td>' +
+      '<td>' + st + (rev ? ' <span class="pill rev">' + rev + ' за преглед</span>' : '') + (S.inbox.some(x => x.firm === f.id) ? ' <span class="pill rev">' + plural(S.inbox.filter(x => x.firm === f.id).length, 'нов файл', 'нови файла') + '</span>' : '') +
+      ((n => n ? ' <span class="pill rev">' + plural(n, 'отговор', 'отговора') + ' от клиента</span>' : '')(S.replies.filter(x => x.firm === f.id).length + S.questions.filter(x => x.firm === f.id && x.answer).length)) + '</td>' +
       '<td><button class="btn small" data-act="edit-firm" data-id="' + f.id + '">Редактирай</button></td></tr>';
   }).join('');
   const head = '<div class="head"><div><h1>Приключване на ' + Core.periodLabel(per) + '</h1><p class="sub">Кои фирми са готови за осчетоводяване и кои още дължат документи.</p></div><div class="tools">' + ctx(false) +
@@ -893,7 +979,7 @@ function vClients(){
 }
 
 function txStatus(p, t){
-  if (t.docId){ const d = p.docs.find(x => x.id === t.docId); return ['ok', 'Засечено', d ? '№ ' + d.number : '']; }
+  if (t.docId){ const ds = docsOf(p, t); return ['ok', 'Засечено', ds.length > 1 ? ds.length + ' документа: № ' + ds.map(d => d.number).join(', ') : ds.length ? '№ ' + ds[0].number : '']; }
   if (suggested(p, t)) return ['rev', 'За преглед', 'има вероятен документ'];
   if (t.needsDoc) return ['miss', 'Липсва документ', t.reminded ? 'напомнено на ' + D(t.reminded) : ''];
   return ['none', t.amount > 0 ? 'Постъпление' : 'Не изисква документ', ''];
@@ -906,6 +992,7 @@ function vReconcile(){
     '<button class="btn" data-act="new-tx">Добави плащане ръчно</button>' +
     '<a class="btn" href="#reminders">Напомни за липсващите (' + miss.length + ')</a>' +
     '<label class="dim"><input type="checkbox" id="only-missing"' + (S.onlyMissing ? ' checked' : '') + '> само без документ</label></div>';
+  h += clientBox(f, 'reconcile');
   if (S.imp){
     const i = S.imp, out = i.txs.filter(t => t.amount < 0).length;
     h += '<div class="panel pad"><h2>Преглед преди импорт: ' + esc(i.name) + '</h2><div class="dim">Формат: ' + esc(i.format) + '. Открити ' + plural(i.txs.length, 'движение', 'движения') + ': ' + out + ' изходящи и ' + (i.txs.length - out) + ' входящи.' +
@@ -927,19 +1014,38 @@ function vReconcile(){
   const list = S.onlyMissing ? p.txs.filter(t => t.needsDoc && !t.docId) : p.txs;
   const rows = list.map(t => {
     const [cls, label, extra] = txStatus(p, t); let act = '';
+    const rp = S.replies.find(r => r.firm === f.id && r.period === S.period && r.tx === t.id);
     if (cls === 'miss') act = '<button class="btn small" data-act="no-doc" data-id="' + t.id + '">Без документ</button>';
-    if (cls === 'none' && t.amount < 0) act = '<button class="btn small" data-act="need-doc" data-id="' + t.id + '">Изисква документ</button>';
+    if (cls === 'none' && t.amount < 0) act = '<button class="btn small" data-act="need-doc" data-id="' + t.id + '">Изисква документ</button>' + (Core.cpKey(t.cp) && !S.rules.cp[Core.cpKey(t.cp)] ? ' <button class="btn small" data-act="cp-rule" data-id="' + t.id + '">Винаги без документ</button>' : '');
     if (cls === 'rev') act = '<button class="btn small primary" data-act="confirm" data-id="' + suggested(p, t).id + '">Потвърди</button> <button class="btn small" data-act="show-doc" data-id="' + suggested(p, t).id + '">Виж</button>';
     if (cls === 'ok') act = '<button class="btn small" data-act="show-doc" data-id="' + t.docId + '">Виж документа</button>';
+    if (window.FB && t.amount < 0 && !t.docId) act += ' <button class="btn small" data-act="ask" data-id="' + t.id + '">Попитай</button>';
     act += ' <button class="btn small quiet" data-act="del-tx" data-id="' + t.id + '" aria-label="Изтрий плащането">' + (S.confirm === 'tx' + t.id ? 'Сигурно?' : 'Изтрий') + '</button>';
     return '<tr class="s-' + cls + '"><td class="num">' + D(t.date) + '</td><td class="wrap">' + esc(t.cp) + (t.desc && t.desc !== t.cp ? '<div class="dim">' + esc(t.desc) + '</div>' : '') + '</td><td><span class="chip">' + esc(t.kind) + '</span></td>' +
-      '<td class="num">' + M(t.amount) + '</td><td><span class="pill ' + cls + '">' + label + '</span> <span class="dim">' + esc(extra) + '</span></td><td style="white-space:nowrap">' + act + '</td></tr>';
+      '<td class="num">' + M(t.amount) + '</td><td><span class="pill ' + cls + '">' + label + '</span> <span class="dim">' + esc(extra) + '</span>' +
+      (rp && !t.docId ? '<div class="note info" style="margin-top:6px">Клиентът отговори: ' + esc(rp.note) + '<div class="tools" style="margin-top:6px"><button class="btn small primary" data-act="reply-ok" data-id="' + rp.id + '">Приеми без документ</button><button class="btn small" data-act="reply-no" data-id="' + rp.id + '">Искам документ</button></div></div>' : '') +
+      (t.note && !t.needsDoc ? '<div class="dim">бележка: ' + esc(t.note) + '</div>' : '') +
+      S.questions.filter(x => x.firm === f.id && x.period === S.period && x.tx === t.id).map(x => '<div class="note info" style="margin-top:6px">Въпрос: ' + esc(x.question) + (x.answer ? '<br><strong>Отговор на клиента:</strong> ' + esc(x.answer) : ' <span class="dim">(чака отговор)</span>') +
+        ' <button class="btn small" data-act="q-close" data-id="' + x.id + '">Затвори</button></div>').join('') +
+      (S.editing && S.editing.type === 'ask' && S.editing.tx === t.id ? '<form data-form="ask" class="tools" style="margin-top:6px"><input type="hidden" name="tx" value="' + t.id + '"><input type="text" id="ask-text" name="text" required maxlength="300" placeholder="Въпрос към клиента" aria-label="Въпрос към клиента" style="flex:1;min-width:180px"><button class="btn small primary" type="submit">Изпрати</button><button class="btn small" type="button" data-act="cancel">Отказ</button></form>' : '') + '</td><td style="white-space:nowrap">' + act + '</td></tr>';
   }).join('');
   if (!miss.length && !p.docs.some(d => d.suggestTx && !d.txId)) h += '<div class="note good">Всички плащания на ' + esc(f.name) + ' за периода са покрити.</div>';
   return h + '<div class="panel"><div class="scroll"><table><thead><tr><th class="num">Дата</th><th>Контрагент и основание</th><th>Вид</th><th class="num">Сума</th><th>Статус</th><th>Действие</th></tr></thead><tbody>' +
     (rows || '<tr><td colspan="6" class="empty">Няма плащания без документ.</td></tr>') + '</tbody></table></div></div>';
 }
 
+const KINDS = {invoice: 'Фактура', contract: 'Договор', statement: 'Банково извлечение', other: 'Друг документ'};
+function clientBox(f, where){
+  const mine = S.inbox.filter(x => x.firm === f.id), inv = mine.filter(x => (x.kind || 'invoice') === 'invoice'), rest = mine.filter(x => (x.kind || 'invoice') !== 'invoice' && (where === 'inbox' || x.kind === 'statement'));
+  let h = '';
+  if (where === 'inbox' && inv.length) h += '<div class="note info">Клиентът е качил ' + plural(inv.length, 'нов файл', 'нови файла') + ': ' + esc(inv.slice(0, 5).map(x => x.name).join(', ')) + (inv.length > 5 ? '…' : '') +
+    (inv.some(x => x.note) ? '<br>Бележки: ' + esc([...new Set(inv.filter(x => x.note).map(x => x.note))].join(' · ')) : '') + ' <button class="btn small primary" data-act="read-inbox">Разчети ги</button></div>';
+  if (rest.length) h += '<div class="note info">От клиента:' + rest.map(x => '<div style="margin-top:6px">' + KINDS[x.kind] + ' „' + esc(x.name) + '“' + (x.note ? ' · ' + esc(x.note) : '') + '<div class="tools" style="margin-top:4px">' +
+    (x.kind === 'statement' ? '<button class="btn small primary" data-act="imp-client" data-id="' + x.id + '">Импортирай</button>' : '') +
+    '<a class="btn small" href="/api/files/' + encodeURIComponent(x.id) + '" target="_blank" rel="noopener">Отвори</a><button class="btn small" data-act="file-done" data-id="' + x.id + '">Прегледано</button></div></div>').join('') + '</div>';
+  return h;
+}
+const dupOf = (p, d) => d.number && p.docs.find(x => x !== d && x.number === d.number && (x.supplierEik && d.supplierEik ? x.supplierEik === d.supplierEik : Core.nameSim(x.supplier, d.supplier) >= 0.5));
 function docStatus(p, d){
   if (d.txId){ const t = p.txs.find(x => x.id === d.txId); return ['ok', 'Платен на ' + (t ? D(t.date) : '')]; }
   if (d.suggestTx) return ['rev', 'За преглед'];
@@ -956,7 +1062,10 @@ function docForm(d){
     '<label>Дата<input type="date" id="doc-date" name="date" value="' + v('date') + '"></label>' +
     '<label>Данъчна основа<input type="text" id="doc-base" name="base" inputmode="decimal" value="' + (d.base == null ? '' : d.base.toFixed(2)) + '"></label>' +
     '<label>ДДС<input type="text" id="doc-vat" name="vat" inputmode="decimal" value="' + (d.vat == null ? '' : d.vat.toFixed(2)) + '"></label>' +
-    '<label>Общо<input type="text" id="doc-total" name="total" inputmode="decimal" value="' + (d.total == null ? '' : d.total.toFixed(2)) + '"></label></div>' +
+    '<label>Общо<input type="text" id="doc-total" name="total" inputmode="decimal" value="' + (d.total == null ? '' : d.total.toFixed(2)) + '"></label>' +
+    '<label>Сметка (дебит)<input type="text" id="doc-acc" name="acc" list="acc-list" value="' + v('acc') + '"><datalist id="acc-list">' + Core.ACCOUNTS.map(a => '<option value="' + a[0] + '">' + a[1] + '</option>').join('') + '</datalist></label>' +
+    '<label>Данъчен кредит<select id="doc-vatmode" name="vatMode">' + Object.keys(Core.VATM).map(k => '<option value="' + k + '"' + ((d.vatMode || 'full') === k ? ' selected' : '') + '>' + Core.VATM[k] + '</option>').join('') + '</select></label>' +
+    '<label class="full" style="flex-direction:row;align-items:center;gap:8px;color:var(--ink);font-size:14px"><input type="checkbox" id="doc-remember" name="remember" style="width:auto" checked> Запомни сметката и данъчния кредит за този доставчик</label></div>' +
     '<div class="tools"><button class="btn primary" type="submit">Запази</button><button class="btn" type="button" data-act="cancel">Отказ</button></div></form>';
 }
 function vInbox(){
@@ -967,10 +1076,7 @@ function vInbox(){
   h += '<div class="drop" data-drop="docs"><label class="btn primary" for="doc-files">Качи фактури</label>' +
     '<button class="btn" data-act="new-doc">Въведи ръчно</button><div class="dim" style="margin-top:8px">Снимки (JPG, PNG) или PDF, може и няколко наведнъж. ' +
     (sample ? 'Разчитането е с Claude и ползва вашия лимит.' : 'Автоматичното разчитане не е достъпно в този изглед, данните се въвеждат ръчно.') + '</div></div>';
-  const fresh = S.inbox.filter(x => x.firm === f.id);
-  if (fresh.length) h += '<div class="note info">Клиентът е качил ' + plural(fresh.length, 'нов файл', 'нови файла') + ': ' + esc(fresh.slice(0, 5).map(x => x.name).join(', ')) + (fresh.length > 5 ? '…' : '') +
-    (fresh.some(x => x.note) ? '<br>Бележки: ' + esc(fresh.filter(x => x.note).map(x => x.note).join(' · ')) : '') +
-    ' <button class="btn small primary" data-act="read-inbox">Разчети ги</button></div>';
+  h += clientBox(f, 'inbox');
   const rows = list.map(d => { const [cls, label] = docStatus(p, d);
     return '<tr class="click s-' + cls + (d.id === S.doc ? ' sel' : '') + '" data-act="pick-doc" data-id="' + d.id + '" tabindex="0"><td class="num">' + D(d.date) + '</td>' +
       '<td class="wrap">' + esc(d.supplier || d.file || 'Без име') + '<div class="dim">' + (d.number ? '№ ' + esc(d.number) : esc(d.file || '')) + '</div></td><td class="num">' + M(d.total) + '</td><td><span class="pill ' + cls + '">' + label + '</span></td></tr>'; }).join('');
@@ -979,17 +1085,20 @@ function vInbox(){
   if (S.editing && S.editing.type === 'doc') det = docForm(S.editing.data);
   else if (d){
     const [cls, label] = docStatus(p, d), sug = d.suggestTx ? p.txs.find(t => t.id === d.suggestTx) : null;
-    const free = p.txs.filter(t => t.amount < 0 && !t.docId);
+    const free = p.txs.filter(t => t.amount < 0 && !t.docId).concat(p.txs.filter(t => t.amount < 0 && t.docId));
     det = '<div class="pad"><div><h2>' + esc(Core.TYPES[d.docType] || 'Документ') + ' ' + (d.number ? '№ ' + esc(d.number) : '') + '</h2><div class="dim">' + esc(d.source || '') + (d.file ? ': ' + esc(d.file) : '') + ', получен на ' + D(d.received) +
       (d.ai || d.source === 'Качен файл' ? ', увереност ' + Math.round((d.confidence || 0) * 100) + '%' : '') + '</div></div>' +
-      d.issues.map(x => '<div class="note warn">' + esc(x) + '</div>').join('') + (d.notes ? '<div class="note info">' + esc(d.notes) + '</div>' : '') +
+      d.issues.map(x => '<div class="note warn">' + esc(x) + '</div>').join('') + d.warnings.map(x => '<div class="note info">' + esc(x) + '</div>').join('') + (dupOf(p, d) ? '<div class="note warn">Възможен дубликат: вече има документ № ' + esc(d.number) + ' от същия доставчик.</div>' : '') + (d.notes ? '<div class="note info">' + esc(d.notes) + '</div>' : '') +
       '<dl class="fields"><dt>Доставчик</dt><dd>' + esc(d.supplier) + '</dd><dt>ЕИК</dt><dd>' + esc(d.supplierEik) + '</dd><dt>Дата</dt><dd>' + Core.fd(d.date) + '</dd>' +
       '<dt>Данъчна основа</dt><dd>' + M(d.base) + '</dd><dt>ДДС</dt><dd>' + M(d.vat) + '</dd><dt>Общо</dt><dd><strong>' + M(d.total) + ' ' + esc(d.currency || '') + '</strong></dd></dl>' +
       (d.lines.length ? '<div class="scroll"><table class="lines"><thead><tr><th>Ред</th><th class="num">К-во</th><th>Мярка</th><th class="num">Ед. цена</th><th class="num">Стойност</th></tr></thead><tbody>' +
         d.lines.map(l => '<tr><td class="wrap">' + esc(l.name) + '</td><td class="num">' + (l.qty == null ? '' : l.qty) + '</td><td>' + esc(l.unit) + '</td><td class="num">' + M(l.price) + '</td><td class="num">' + M(l.amount) + '</td></tr>').join('') + '</tbody></table></div>' : '') +
+      '<div class="note ' + (d.acc ? 'info' : 'warn') + '">' + (d.acc ? 'Контиране: Дт ' + esc(d.acc) + ' / Кт 401, данъчен кредит: ' + Core.VATM[d.vatMode || 'full'] +
+        ' <span class="dim">(' + ({rule: 'по правило за доставчика', ai: 'предложение по вид на доставката: ' + (Core.CAT_LABEL[d.category] || ''), manual: 'зададено ръчно'}[d.accSrc] || '') + ')</span>'
+        : (d.category === 'asset' ? 'Вероятно дълготраен актив. ' : '') + 'Няма сметка. Задайте я от „Редактирай“ и тя ще се помни за доставчика.') + '</div>' +
       '<div><span class="pill ' + cls + '">' + label + '</span></div>' +
       (sug ? '<div class="note info">Вероятно плащане: ' + D(sug.date) + ', ' + esc(sug.cp) + ', ' + M(sug.amount) + '</div><div class="tools"><button class="btn primary" data-act="confirm" data-id="' + d.id + '">Потвърди засичането</button><button class="btn" data-act="reject" data-id="' + d.id + '">Не е това</button></div>' : '') +
-      (!d.txId && free.length ? '<div class="tools"><select id="link-tx" aria-label="Плащане за свързване">' + free.map(t => '<option value="' + t.id + '">' + D(t.date) + ' · ' + esc(t.cp.slice(0, 40)) + ' · ' + M(t.amount) + '</option>').join('') + '</select><button class="btn" data-act="link" data-id="' + d.id + '">Свържи с плащане</button></div>' : '') +
+      (!d.txId && free.length ? '<div class="tools"><select id="link-tx" aria-label="Плащане за свързване">' + free.map(t => '<option value="' + t.id + '">' + D(t.date) + ' · ' + esc(t.cp.slice(0, 40)) + ' · ' + M(t.amount) + (t.docId ? ' · вече с документ' : '') + '</option>').join('') + '</select><button class="btn" data-act="link" data-id="' + d.id + '">Свържи с плащане</button></div>' : '') +
       '<div class="tools"><button class="btn" data-act="edit-doc" data-id="' + d.id + '">Редактирай</button>' + (window.FB && d.fileId ? '<a class="btn" href="/api/files/' + encodeURIComponent(d.fileId) + '" target="_blank" rel="noopener">Виж оригинала</a>' : '') + (d.txId ? '<button class="btn" data-act="unlink" data-id="' + d.id + '">Разкачи от плащането</button>' : '<button class="btn" data-act="move-doc" data-id="' + d.id + '">Премести в следващия месец</button>') +
       '<button class="btn quiet" data-act="del-doc" data-id="' + d.id + '">' + (S.confirm === 'doc' + d.id ? 'Потвърди изтриването' : 'Изтрий') + '</button></div></div>';
   }
@@ -999,13 +1108,13 @@ function vInbox(){
 
 function vReminders(){
   const f = curFirm(); if (!f) return needFirm('Напомняния');
-  const p = P(f.id), miss = missing(p).filter(t => !suggested(p, t));
+  const p = P(f.id), miss = toAsk(p);
   const rk = key(f.id, S.period);
   const text = S.rem[rk] != null ? S.rem[rk] : (miss.length ? Core.reminderText(f, miss, S.period) : '');
   const isMail = /@/.test(f.address || '');
   const rows = S.firms.map(x => { const q = P(x.id), n = missing(q).length, last = q.reminders.length ? q.reminders[q.reminders.length - 1].at : null;
     return '<tr class="click ' + (n ? 's-miss' : q.txs.length ? 's-ok' : '') + (x.id === f.id ? ' sel' : '') + '" data-act="pick-firm" data-id="' + x.id + '" tabindex="0"><td class="wrap">' + esc(x.name) + '</td><td><span class="chip">' + esc(x.channel || 'Viber') + '</span></td>' +
-      '<td>' + (n ? '<span class="pill miss">' + plural(n, 'липсващ', 'липсващи') + '</span>' : '<span class="pill ' + (q.txs.length ? 'ok">Всичко е налице' : 'none">Няма извлечение') + '</span>') + '</td><td class="dim">' + (last ? 'напомнено на ' + D(last) : '') + '</td></tr>'; }).join('');
+      '<td>' + (n ? '<span class="pill miss">' + plural(n, 'липсващ', 'липсващи') + '</span>' : '<span class="pill ' + (q.txs.length ? 'ok">Всичко е налице' : 'none">Няма извлечение') + '</span>') + '</td><td class="dim">' + (last ? 'напомнено на ' + D(last) : '') + (x.lastAuto ? ' авт. имейл на ' + D(x.lastAuto) : '') + (x.auto ? ' <span class="chip">авт.</span>' : '') + '</td></tr>'; }).join('');
   let right;
   if (!miss.length) right = '<div class="empty">' + (p.txs.length ? 'За ' + esc(f.name) + ' няма липсващи документи за периода.' : 'За ' + esc(f.name) + ' още няма импортирано извлечение.') + '</div>';
   else right = '<div class="pad"><h2>Съобщение до ' + esc(f.contact || f.name) + '</h2><div class="dim">Канал: ' + esc(f.channel || 'Viber') + (f.address ? ', ' + esc(f.address) : '') + '. Текстът може да се редактира.</div>' +
@@ -1022,19 +1131,61 @@ function vReminders(){
     (hist ? '<div class="panel"><div class="scroll"><table><thead><tr><th class="num">Изпратено</th><th>Канал</th><th>Обхват</th><th>Резултат</th></tr></thead><tbody>' + hist + '</tbody></table></div></div>' : '');
 }
 
-const EXPORTS = {docs: ['Документи и плащания', 'dokumenti', Core.exportDocs], lines: ['Редове по документи', 'redove', Core.exportLines], missing: ['Плащания без документ', 'lipsvashti', Core.exportMissing]};
-function exportData(){ const f = curFirm(); return EXPORTS[S.exp][2](P(f.id), S.dec); }
+const EXPORTS = {docs: ['Документи и плащания', 'dokumenti', Core.exportDocs], ledger: ['Дневник на покупките (работен)', 'dnevnik_pokupki', Core.exportLedger], lines: ['Редове по документи', 'redove', Core.exportLines], missing: ['Плащания без документ', 'lipsvashti', Core.exportMissing]};
+function exportData(){ const f = curFirm(); return EXPORTS[S.exp][2](P(f.id), S.dec, S.exp === 'docs' ? S.ecfg : null); }
+function saveEcfg(){ pref('ecfg', JSON.stringify(S.ecfg)); }
+function exportSetup(){
+  const c = S.ecfg, on = c.cols && c.cols.length ? c.cols : Core.DEFAULT_COLS, all = on.concat(Core.COLS.map(x => x[0]).filter(k => !on.includes(k)));
+  const sel = (id, val, opts) => '<select id="' + id + '">' + opts.map(o => '<option value="' + o[0] + '"' + (o[0] === (val || opts[0][0]) ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select>';
+  return '<details class="panel"' + (S.setupOpen ? ' open' : '') + ' id="exp-setup"><summary class="pad" style="cursor:pointer;font-weight:600">Настройка на файла по шаблона на счетоводната програма</summary><div class="pad" style="padding-top:0">' +
+    '<div class="ctx"><label>Разделител ' + sel('ecfg-delim', c.delim, [[';', 'точка и запетая'], [',', 'запетая'], ['tab', 'табулация'], ['|', 'черта |']]) + '</label>' +
+    '<label>Кодировка ' + sel('ecfg-enc', c.enc, [['utf8', 'UTF-8'], ['1251', 'Windows-1251']]) + '</label>' +
+    '<label>Дати ' + sel('ecfg-date', c.date, [['dmy', 'дд.мм.гггг'], ['iso', 'гггг-мм-дд']]) + '</label>' +
+    '<label><input type="checkbox" id="ecfg-header"' + (c.header === false ? '' : ' checked') + '> заглавен ред</label></div>' +
+    '<div class="scroll"><table class="lines" style="min-width:420px"><tbody>' + all.map((k, i) => { const col = Core.COLS.find(x => x[0] === k), use = on.includes(k);
+      return '<tr><td><label><input type="checkbox" data-col="' + k + '"' + (use ? ' checked' : '') + '> ' + col[1] + '</label></td><td style="white-space:nowrap">' +
+        (use ? '<button class="btn small" data-act="col-up" data-id="' + k + '"' + (i ? '' : ' disabled') + ' aria-label="Премести нагоре ' + col[1] + '">↑</button> <button class="btn small" data-act="col-down" data-id="' + k + '"' + (i < on.length - 1 ? '' : ' disabled') + ' aria-label="Премести надолу ' + col[1] + '">↓</button>' : '') + '</td></tr>'; }).join('') +
+    '</tbody></table></div><div class="tools"><button class="btn small" data-act="col-reset">Върни стандартните колони</button><span class="dim">Настройката се помни в този браузър.</span></div></div></details>';
+}
 function vExport(){
   const f = curFirm(); if (!f) return needFirm('Експорт');
-  const p = P(f.id), miss = missing(p), text = exportData(), n = text.split('\r\n').length - 1;
+  const p = P(f.id), miss = missing(p), text = exportData(), n = text ? text.split('\r\n').length - (S.exp === 'docs' && S.ecfg.header === false ? 0 : 1) : 0;
   return '<div class="head"><div><h1>Експорт към счетоводната програма</h1><p class="sub">CSV файлове с разделител точка и запетая, които се отварят в Excel и се импортират в счетоводния софтуер.</p></div><div class="tools">' + ctx(true) + '</div></div>' + banner() +
     '<div class="radios">' + Object.keys(EXPORTS).map(k => '<label><input type="radio" name="exp" id="exp-' + k + '" value="' + k + '"' + (S.exp === k ? ' checked' : '') + '> ' + EXPORTS[k][0] + '</label>').join('') +
     '<label>Десетичен знак <select id="dec"><option value=","' + (S.dec === ',' ? ' selected' : '') + '>запетая</option><option value="."' + (S.dec === '.' ? ' selected' : '') + '>точка</option></select></label></div>' +
     (miss.length && S.exp !== 'missing' ? '<div class="note warn">' + plural(miss.length, 'плащане е', 'плащания са') + ' без документ. <a href="#reconcile" style="color:inherit">Към засичането</a></div>' : '') +
+    (S.exp === 'docs' ? exportSetup() : '') +
     (n ? '<div class="panel"><pre id="export-pre">' + esc(text.split('\r\n').slice(0, 16).join('\n')) + (n > 15 ? '\n…' : '') + '</pre></div>' : '<div class="panel"><div class="empty">Няма данни за този файл.</div></div>') +
     '<div class="tools">' + (downloads ? '<button class="btn primary" data-act="download"' + (n ? '' : ' disabled') + '>Изтегли CSV (' + plural(n, 'ред', 'реда') + ')</button>' : '') +
     '<button class="btn' + (downloads ? '' : ' primary') + '" data-act="copy-exp"' + (n ? '' : ' disabled') + '>' + (S.copied === 'exp' ? 'Копирано' : 'Копирай съдържанието') + '</button></div>' +
+    (p.txs.length || p.docs.length ? '<div class="tools"><button class="btn" data-act="' + (p.closed ? 'reopen-period">Отвори месеца отново' : 'close-period">Отбележи месеца като приключен') + '</button>' +
+      (p.closed ? '<span class="dim">Приключен на ' + D(p.closed) + '. Автоматичните напомняния за него са спрени.</span>' : '') + '</div>' : '') +
     '<div class="dim">Файлът е общ CSV. Ако счетоводната ви програма изисква собствен шаблон за импорт, колоните се подреждат по него.</div>';
+}
+
+function vRules(){
+  const sup = Object.entries(S.rules.sup), cp = Object.entries(S.rules.cp);
+  return '<div class="head"><div><h1>Правила</h1><p class="sub">Какво системата е запомнила. Правилата се прилагат за всички фирми на кантората при следващите документи и извлечения.</p></div></div>' + banner() +
+    '<div class="panel"><div class="pad"><h2>Контиране по доставчик</h2><div class="dim">Създава се, когато зададете сметка на документ и оставите отметката „Запомни“.</div></div><div class="scroll"><table style="min-width:480px"><thead><tr><th>Доставчик</th><th>Сметка</th><th>Данъчен кредит</th><th></th></tr></thead><tbody>' +
+    (sup.length ? sup.map(([k, r]) => '<tr><td class="wrap">' + esc(r.name || k) + '<div class="dim">' + esc(k.startsWith('n:') ? 'по име' : 'ЕИК ' + k) + '</div></td><td>Дт ' + esc(r.acc) + ' / Кт 401</td><td>' + Core.VATM[r.vatMode || 'full'] + '</td><td><button class="btn small quiet" data-act="del-rule" data-kind="sup" data-id="' + esc(k) + '">Изтрий</button></td></tr>').join('') : '<tr><td colspan="4" class="empty">Още няма правила за контиране.</td></tr>') + '</tbody></table></div></div>' +
+    '<div class="panel"><div class="pad"><h2>Плащания, които не искат документ</h2><div class="dim">Създава се с бутона „Винаги без документ“ в „Засичане“.</div></div><div class="scroll"><table style="min-width:420px"><tbody>' +
+    (cp.length ? cp.map(([k, r]) => '<tr><td class="wrap">' + esc(r.name || k) + '</td><td><button class="btn small quiet" data-act="del-rule" data-kind="cp" data-id="' + esc(k) + '">Изтрий</button></td></tr>').join('') : '<tr><td class="empty">Още няма такива правила.</td></tr>') + '</tbody></table></div></div>';
+}
+function vOffice(){
+  const me = FB.me || {}, us = S.users;
+  const rows = (us || []).map(u => '<tr><td class="wrap">' + esc(u.email) + (u.me ? ' <span class="chip">вие</span>' : '') + '</td><td class="dim">от ' + D(u.created) + '</td><td>' +
+    (u.me ? '' : '<button class="btn small quiet" data-act="del-user" data-id="' + u.id + '">' + (S.confirm === 'user' + u.id ? 'Потвърди премахването' : 'Премахни') + '</button>') + '</td></tr>').join('');
+  return '<div class="head"><div><h1>' + esc(me.office || 'Кантора') + '</h1><p class="sub">Екип, пароли и архив на данните.</p></div></div>' + banner() +
+    '<div class="panel"><div class="pad"><h2>Екип</h2><div class="dim">Всички в екипа виждат всички фирми на кантората.</div></div><div class="scroll"><table style="min-width:420px"><tbody>' +
+    (us ? rows : '<tr><td class="empty">Зареждане…</td></tr>') + '</tbody></table></div>' +
+    '<form class="pad" data-form="user"><div class="form"><label>Имейл на колегата<input type="email" id="user-email" name="email" required autocomplete="off"></label>' +
+    '<label>Временна парола (поне 10 знака)<input type="text" id="user-pass" name="password" required minlength="10" autocomplete="off"></label></div><div class="tools"><button class="btn primary" type="submit">Добави колега</button></div></form></div>' +
+    '<form class="panel pad" data-form="pass"><h2>Смяна на паролата</h2><div class="form"><label>Текуща парола<input type="password" id="pass-old" name="old" required autocomplete="current-password" style="border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:var(--surface)"></label>' +
+    '<label>Нова парола (поне 10 знака)<input type="password" id="pass-new" name="next" required minlength="10" autocomplete="new-password" style="border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:var(--surface)"></label></div><div class="tools"><button class="btn primary" type="submit">Смени паролата</button></div></form>' +
+    '<div class="panel pad"><h2>Данни и настройки</h2><dl class="fields"><dt>Разчитане с Claude</dt><dd>' + (me.ai ? 'включено' : 'изключено, документите се въвеждат ръчно') + '</dd>' +
+    '<dt>Изпращане на имейли</dt><dd>' + (me.mail ? 'настроено' : 'не е настроено, текстовете се копират ръчно') + '</dd>' +
+    '<dt>Автоматични напомняния</dt><dd>' + (me.mail ? 'на всеки ' + plural(me.remindDays || 3, 'ден', 'дни') + ' в работно време, за фирмите с отметка' : 'изискват настроен имейл') + '</dd></dl>' +
+    '<div class="tools"><a class="btn" href="/api/backup" download>Изтегли архив на данните (JSON)</a><span class="dim">Съдържа фирмите и всички месеци, без оригиналните файлове.</span></div></div>';
 }
 
 function render(){
@@ -1044,11 +1195,13 @@ function render(){
   let miss = 0, rev = 0;
   S.firms.forEach(f => { const p = P(f.id); miss += missing(p).length; rev += p.docs.filter(d => !d.txId && (d.suggestTx || d.issues.length)).length; });
   const counts = {reconcile: miss, inbox: rev + S.inbox.length};
+  const ans = S.replies.length + S.questions.filter(x => x.answer).length;
+  if (ans) counts.reconcile = miss + ' · ' + ans + ' отг.';
   $('nav').innerHTML = VIEWS.map(([id, label]) => '<a href="#' + id + '"' + (id === v ? ' class="on" aria-current="page"' : '') + '>' + label +
     (id in counts ? '<span class="count' + (counts[id] ? '' : ' zero') + '">' + counts[id] + '</span>' : '') + '</a>').join('');
   $('foot').innerHTML = '<div>' + (S.mode === 'db' ? (window.FB ? 'Данните се пазят на сървъра.' : 'Данните се пазят в този артефакт.') : S.mode === 'mem' ? 'Временен режим, без запазване.' : 'Свързване…') + '</div><div>Разчитане с Claude: ' + (sample ? (imgOK ? 'включено' : 'само текст') : 'няма') + '</div>' +
     (window.FB && FB.me ? '<div>' + esc(FB.me.office) + '<br>' + esc(FB.me.email) + '</div><div><button class="btn small" data-act="logout">Изход</button></div>' : '');
-  $('main').innerHTML = {clients: vClients, reconcile: vReconcile, inbox: vInbox, reminders: vReminders, export: vExport}[v]();
+  $('main').innerHTML = {clients: vClients, reconcile: vReconcile, inbox: vInbox, reminders: vReminders, export: vExport, rules: vRules, office: vOffice}[v]();
 }
 function go(h){ if (location.hash === '#' + h) render(); else location.hash = h; }
 async function copy(text, flag){
@@ -1074,6 +1227,12 @@ document.addEventListener('click', async e => {
     case 'new-tx': S.editing = {type: 'tx'}; break;
     case 'del-tx': if (conf !== 'tx' + id){ S.confirm = 'tx' + id; break; } { const t = tx(); p.docs.forEach(d => { if (d.txId === t.id) d.txId = null; if (d.suggestTx === t.id) d.suggestTx = null; }); p.txs = p.txs.filter(x => x !== t); save(); } break;
     case 'no-doc': tx().needsDoc = false; save(); break;
+    case 'cp-rule': { const x = tx(), k = Core.cpKey(x.cp); if (!k) break; S.rules.cp[k] = {name: x.cp}; saveRules(); let n = 0;
+      p.txs.forEach(y => { if (y.amount < 0 && !y.docId && y.needsDoc && Core.cpKey(y.cp) === k){ y.needsDoc = false; n++; } }); if (n) save();
+      S.toast = {cls: 'good', text: 'Запомнено: плащанията към ' + x.cp + ' няма да искат документ. Правилото се маха от раздел „Правила“.'}; break; }
+    case 'del-rule': delete S.rules[el.dataset.kind][id]; saveRules(); break;
+    case 'close-period': ensureP(f.id, S.period).closed = todayISO(); save(); break;
+    case 'reopen-period': delete ensureP(f.id, S.period).closed; save(); break;
     case 'need-doc': tx().needsDoc = true; autoMatch(p); save(); break;
     case 'imp-ok': await confirmImport(); return;
     case 'imp-flip': S.imp.txs.forEach(t => t.amount = -t.amount); S.imp.signed = true; break;
@@ -1084,30 +1243,43 @@ document.addEventListener('click', async e => {
     case 'edit-doc': S.editing = {type: 'doc', data: doc()}; break;
     case 'confirm': { const d = doc(), t = p.txs.find(x => x.id === d.suggestTx); if (t && !t.docId) link(p, d, t); else d.suggestTx = null; save(); break; }
     case 'reject': doc().suggestTx = null; save(); break;
-    case 'link': { const d = doc(), t = p.txs.find(x => x.id === $('link-tx').value); if (t && !t.docId){ link(p, d, t); save(); } break; }
+    case 'link': { const d = doc(), t = p.txs.find(x => x.id === $('link-tx').value); if (t){ link(p, d, t); save(); } break; }
     case 'unlink': unlink(p, doc()); save(); break;
     case 'del-doc': if (conf !== 'doc' + id){ S.confirm = 'doc' + id; break; } { const d = doc(); unlink(p, d); p.docs = p.docs.filter(x => x !== d); S.doc = null; save(); } break;
     case 'move-doc': { const d = doc(), np = Core.shiftPeriod(S.period, 1), q = await loadP(f.id, np); p.docs = p.docs.filter(x => x !== d); d.suggestTx = null; q.docs.unshift(d); const n = autoMatch(q); save(); save(f.id, np);
       S.toast = {cls: 'good', text: 'Документът е преместен в ' + Core.periodLabel(np) + (n ? ' и е засечен с плащане там.' : '.')}; S.doc = null; break; }
     case 'copy-rem': S.rem[key(f.id, S.period)] = $('rem-text').value; return copy($('rem-text').value, 'rem');
-    case 'mark-rem': { const text = $('rem-text').value, list = missing(p).filter(t => !suggested(p, t)); const q = ensureP(f.id, S.period);
+    case 'mark-rem': { const text = $('rem-text').value, list = toAsk(p); const q = ensureP(f.id, S.period);
       list.forEach(t => t.reminded = todayISO()); q.reminders.push({id: uid('r'), at: todayISO(), channel: f.channel || 'Viber', txIds: list.map(t => t.id), text: text.slice(0, 4000)});
       delete S.rem[key(f.id, S.period)]; save(); S.toast = {cls: 'good', text: 'Отбелязано: напомняне до ' + (f.contact || f.name) + ' за ' + plural(list.length, 'плащане', 'плащания') + '.'}; break; }
     case 'copy-exp': return copy(exportData(), 'exp');
+    case 'reply-ok': { const r = S.replies.find(x => x.id === id), t = r && p.txs.find(x => x.id === r.tx); if (t){ t.needsDoc = false; t.note = r.note; save(); }
+      S.replies = S.replies.filter(x => x.id !== id); try { await FB.replyDone(id); } catch (err) {} break; }
+    case 'ask': S.editing = {type: 'ask', tx: id}; break;
+    case 'q-close': S.questions = S.questions.filter(x => x.id !== id); try { await FB.closeQ(id); } catch (err) {} break;
+    case 'file-done': S.inbox = S.inbox.filter(x => x.id !== id); try { await FB.done(id); } catch (err) {} break;
+    case 'imp-client': { const x = S.inbox.find(i => i.id === id); if (!x) break; S.busy = 'Изтеглям извлечението…'; render();
+      try { const file = await FB.file(x); await onStatement(file); if (S.imp) S.imp.inboxId = x.id; } catch (err) { S.busy = null; S.toast = {cls: 'crit', text: 'Файлът не беше изтеглен.'}; }
+      if (view() !== 'reconcile') return go('reconcile'); break; }
+    case 'reply-no': S.replies = S.replies.filter(x => x.id !== id); try { await FB.replyDone(id); } catch (err) {} break;
+    case 'col-up': case 'col-down': { const on = (S.ecfg.cols && S.ecfg.cols.length ? S.ecfg.cols : Core.DEFAULT_COLS).slice(), i = on.indexOf(id), j = act === 'col-up' ? i - 1 : i + 1;
+      if (i >= 0 && j >= 0 && j < on.length){ [on[i], on[j]] = [on[j], on[i]]; S.ecfg.cols = on; saveEcfg(); } S.setupOpen = true; break; }
+    case 'col-reset': S.ecfg = {}; saveEcfg(); S.setupOpen = true; break;
+    case 'del-user': if (conf !== 'user' + id){ S.confirm = 'user' + id; break; } try { await FB.delUser(id); S.users = await FB.users(); S.toast = {cls: 'good', text: 'Достъпът е премахнат.'}; } catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Неуспешно.'}; } break;
     case 'logout': await FB.logout(); return;
     case 'copy-portal': return copy(firmById(id).portal, 'portal');
     case 'reset-portal': if (conf !== 'portal' + id){ S.confirm = 'portal' + id; break; } try { const url = await FB.resetPortal(id); firmById(id).portal = url; S.editing = {type: 'firm', data: firmById(id)}; } catch (err) { S.toast = {cls: 'crit', text: 'Връзката не беше сменена.'}; } break;
     case 'read-inbox': { const items = []; S.busy = 'Изтеглям файловете от клиента…'; render();
-      for (const x of S.inbox.filter(i => i.firm === f.id)){ try { items.push({file: await FB.file(x), inboxId: x.id}); } catch (err) {} }
+      for (const x of S.inbox.filter(i => i.firm === f.id && (i.kind || 'invoice') === 'invoice')){ try { items.push({file: await FB.file(x), inboxId: x.id, tx: x.tx}); } catch (err) {} }
       S.busy = null; if (items.length) onDocs(items); else render(); return; }
-    case 'send-rem': { const text = $('rem-text').value, list = missing(p).filter(t => !suggested(p, t)), q = ensureP(f.id, S.period);
+    case 'send-rem': { const text = $('rem-text').value, list = toAsk(p), q = ensureP(f.id, S.period);
       S.busy = 'Изпращам имейл…'; render();
       try { await FB.email(f.id, 'Липсващи документи за ' + Core.periodLabel(S.period), text);
         list.forEach(t => t.reminded = todayISO()); q.reminders.push({id: uid('r'), at: todayISO(), channel: 'Имейл', txIds: list.map(t => t.id), text: text.slice(0, 4000)});
         delete S.rem[key(f.id, S.period)]; save(); S.toast = {cls: 'good', text: 'Имейлът е изпратен до ' + f.address + '.'}; }
       catch (err) { S.toast = {cls: 'crit', text: 'Имейлът не беше изпратен: ' + ((err && err.message) || 'грешка') + '.'}; }
       S.busy = null; break; }
-    case 'download': try { await downloads.save({filename: 'finbridge_' + EXPORTS[S.exp][1] + '_' + S.period + '.csv', data: '﻿' + exportData()}); S.toast = {cls: 'good', text: 'Файлът е предаден за запазване.'}; }
+    case 'download': try { await downloads.save({filename: 'finbridge_' + EXPORTS[S.exp][1] + '_' + S.period + '.csv', data: S.exp === 'docs' && S.ecfg.enc === '1251' ? Core.encode1251(exportData()) : '\uFEFF' + exportData()}); S.toast = {cls: 'good', text: 'Файлът е предаден за запазване.'}; }
       catch (err) { if (!err || err.code !== 'declined') S.toast = {cls: 'warn', text: 'Изтеглянето не е достъпно тук. Използвайте „Копирай съдържанието“.'}; } break;
   }
   render();
@@ -1117,8 +1289,23 @@ document.addEventListener('submit', async e => {
   e.preventDefault();
   const v = Object.fromEntries(new FormData(form)), f = curFirm();
   const t = s => String(s || '').trim();
+  if (form.dataset.form === 'ask'){
+    try { await FB.ask(f.id, S.period, v.tx, t(v.text)); S.questions = await FB.questions(); S.toast = {cls: 'good', text: 'Въпросът е изпратен. Клиентът ще го види в страницата си' + (/@/.test(f.address || '') && (FB.me || {}).mail ? ' и ще получи имейл.' : '.')}; }
+    catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Въпросът не беше изпратен.'}; }
+    S.editing = null; return render();
+  }
+  if (form.dataset.form === 'user'){
+    try { await FB.addUser(t(v.email), v.password); S.users = await FB.users(); S.toast = {cls: 'good', text: 'Добавен е ' + t(v.email) + '. Предайте му паролата по сигурен канал.'}; }
+    catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Неуспешно.'}; }
+    return render();
+  }
+  if (form.dataset.form === 'pass'){
+    try { await FB.password(v.old, v.next); S.toast = {cls: 'good', text: 'Паролата е сменена. Другите ви сесии са прекратени.'}; }
+    catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Неуспешно.'}; }
+    return render();
+  }
   if (form.dataset.form === 'firm'){
-    const firm = {id: v.id || uid('f'), name: t(v.name), eik: t(v.eik).replace(/\D/g, ''), contact: t(v.contact), channel: v.channel, address: t(v.address)};
+    const firm = {id: v.id || uid('f'), name: t(v.name), eik: t(v.eik).replace(/\D/g, ''), contact: t(v.contact), channel: v.channel, address: t(v.address), auto: v.auto === 'on', stats: v.stats === 'on'};
     if (!firm.name) return;
     S.editing = null; S.firm = firm.id; pref('firm', firm.id); render(); await saveFirm(firm); return render();
   }
@@ -1137,8 +1324,12 @@ document.addEventListener('submit', async e => {
     let d = q.docs.find(x => x.id === v.id);
     const nd = Core.validateDoc({docType: v.docType, supplier: v.supplier, supplierEik: v.supplierEik, number: v.number, date: v.date, base: v.base, vat: v.vat, total: v.total}, null);
     nd.confidence = nd.issues.length ? 0.6 : 1;
-    if (d){ Object.assign(d, nd, {lines: d.lines, supplierVat: d.supplierVat, currency: d.currency, notes: ''}); }
+    if (d){ Object.assign(d, nd, {lines: d.lines, supplierVat: d.supplierVat, currency: d.currency, notes: '', category: d.category || '', subject: d.subject || ''}); }
     else { d = Object.assign(nd, {id: uid('d'), file: '', source: 'Ръчно въведен', received: todayISO(), txId: null, suggestTx: null, currency: Core.cur(S.period) === '€' ? 'EUR' : 'BGN'}); q.docs.unshift(d); }
+    const acc = t(v.acc).slice(0, 12);
+    if (acc){ Object.assign(d, {acc, vatMode: Core.VATM[v.vatMode] ? v.vatMode : 'full', accSrc: 'manual'});
+      if (v.remember === 'on' && d.supplier){ S.rules.sup[Core.supplierKey(d)] = {acc, vatMode: d.vatMode, name: d.supplier}; saveRules(); } }
+    else { d.accSrc = ''; applyCoding(d); }
     if (!d.txId) autoMatch(q);
     S.doc = d.id; S.editing = null; save(); return render();
   }
@@ -1149,6 +1340,12 @@ document.addEventListener('change', e => {
   if (t.id === 'firm'){ S.firm = t.value; pref('firm', t.value); S.doc = null; S.imp = null; S.editing = null; render(); }
   if (t.id === 'only-missing'){ S.onlyMissing = t.checked; render(); }
   if (t.name === 'exp'){ S.exp = t.value; S.copied = null; render(); }
+  if (/^ecfg-/.test(t.id) || t.dataset.col){
+    const on = (S.ecfg.cols && S.ecfg.cols.length ? S.ecfg.cols : Core.DEFAULT_COLS).slice();
+    if (t.id === 'ecfg-delim') S.ecfg.delim = t.value; if (t.id === 'ecfg-enc') S.ecfg.enc = t.value; if (t.id === 'ecfg-date') S.ecfg.date = t.value; if (t.id === 'ecfg-header') S.ecfg.header = t.checked;
+    if (t.dataset.col){ const k = t.dataset.col; if (t.checked && !on.includes(k)) on.push(k); if (!t.checked && on.length > 1) on.splice(on.indexOf(k), 1); S.ecfg.cols = on; }
+    saveEcfg(); S.setupOpen = true; S.copied = null; render();
+  }
   if (t.id === 'dec'){ S.dec = t.value; S.copied = null; render(); }
   if (t.id === 'rem-text'){ const f = curFirm(); if (f) S.rem[key(f.id, S.period)] = t.value; }
   if (t.id === 'stmt-file' && t.files[0]){ const f = t.files[0]; t.value = ''; if (curFirm()) onStatement(f); }
@@ -1160,7 +1357,9 @@ document.addEventListener('dragover', e => { const z = e.target.closest && e.tar
 document.addEventListener('dragleave', e => { const z = e.target.closest && e.target.closest('[data-drop]'); if (z) z.classList.remove('over'); });
 document.addEventListener('drop', e => { const z = e.target.closest && e.target.closest('[data-drop]'); if (!z) return; e.preventDefault(); const fs = e.dataTransfer.files; if (!fs.length) return;
   if (z.dataset.drop === 'docs') onDocs(fs); else onStatement(fs[0]); });
-window.addEventListener('hashchange', () => { S.editing = null; S.confirm = null; render(); });
+document.addEventListener('toggle', e => { if (e.target.id === 'exp-setup') S.setupOpen = e.target.open; }, true);
+function loadOffice(){ if (window.FB && view() === 'office') FB.users().then(u => { S.users = u; render(); }).catch(() => {}); }
+window.addEventListener('hashchange', () => { S.editing = null; S.confirm = null; render(); loadOffice(); });
 boot();
 </script>
 </body>

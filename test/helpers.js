@@ -12,8 +12,8 @@ exports.startServer=(port,env)=>new Promise((ok,no)=>{const dir=fs.mkdtempSync(p
   const p=spawn(process.execPath,['--no-warnings',path.join(__dirname,'..','server.js')],{env:{...process.env,PORT:port,DATA_DIR:dir,...env},stdio:['ignore','pipe','inherit']});
   p.stdout.on('data',d=>{if(String(d).includes('слуша'))ok({dir,stop:()=>p.kill()})});p.on('exit',c=>no(new Error('server exited '+c)))});
 exports.invoiceReply=j=>{const t=j.messages[0].content.find(c=>c.type==='text').text;
-  const inv=(s,e,n,d,b,v,tot,l)=>JSON.stringify({docType:'invoice',supplier:s,supplierEik:e,supplierVat:'BG'+e,recipientEik:'203456781',number:n,date:d,currency:'EUR',base:b,vat:v,total:tot,lines:[l],confidence:.96,notes:''});
-  if(t.includes('Гориво Плюс'))return{text:'```json\n'+inv('Гориво Плюс АД','489280011','1000000414','2026-10-05',110.5,22.1,132.6,{name:'Дизелово гориво',qty:65,unit:'л',price:1.7,amount:110.5})+'\n```'};
-  if(t.includes('Бетон Трейд'))return{text:'Ето данните: '+inv('Бетон Трейд ООД','507081372','1000000416','2026-10-09',1950,390,2340,{name:'Бетон B25',qty:15,unit:'м³',price:130,amount:1950})};
+  const inv=(s,e,n,d,b,v,tot,l)=>JSON.stringify({docType:'invoice',supplier:s,supplierEik:e,supplierVat:'BG'+e,recipientEik:'203456781',number:n,date:d,currency:'EUR',base:b,vat:v,total:tot,lines:[l],confidence:.96,notes:'',category:s.includes('Гориво')?'fuel':s.includes('Бетон')?'materials':null,subject:l.name});
+  if(t.includes('Гориво Плюс'))return{text:'```json\n'+inv('Гориво Плюс АД','489280014','1000000414','2026-10-05',110.5,22.1,132.6,{name:'Дизелово гориво',qty:65,unit:'л',price:1.7,amount:110.5})+'\n```'};
+  if(t.includes('Бетон Трейд'))return{text:'Ето данните: '+inv('Бетон Трейд ООД','507081376','1000000416','2026-10-09',1950,390,2340,{name:'Бетон B25',qty:15,unit:'м³',price:130,amount:1950})};
   if(t.includes('LIMIT'))return{status:429};if(t.includes('GARBAGE'))return{text:'не мога'};
-  return{text:inv('Наем Техника ООД','925882776','1000000418','2026-10-19',750,150,900,{name:'Наем на багер',qty:5,unit:'дни',price:150,amount:750})}};
+  return{text:inv('Наем Техника ООД','925882778','1000000418','2026-10-19',750,150,900,{name:'Наем на багер',qty:5,unit:'дни',price:150,amount:750})}};

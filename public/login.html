@@ -6,27 +6,44 @@
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 "Segoe UI",Arial,sans-serif;display:flex;justify-content:center;padding:48px 16px}
 main{width:100%;max-width:380px;display:flex;flex-direction:column;gap:16px}h1{font-size:24px;margin:0}h1 span{color:var(--accent)}
 form{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:20px;display:flex;flex-direction:column;gap:12px}
-label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted)}input{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:9px 10px}
+label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted)}input,select{font:inherit;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:9px 10px}
 button{font:inherit;font-weight:600;border:0;border-radius:8px;padding:10px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
 .link{background:none;color:var(--accent);padding:0;font-weight:400;text-align:left}.err{color:var(--crit);min-height:1.4em;font-size:14px}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 </style></head><body><main>
 <h1>Fin<span>Bridge</span></h1>
 <form id="f" novalidate>
-  <label id="office-row" hidden>Име на кантората<input id="office" name="office" autocomplete="organization"></label>
-  <label>Имейл<input id="email" name="email" type="email" autocomplete="username" required></label>
-  <label>Парола<input id="password" name="password" type="password" autocomplete="current-password" required></label>
+  <label id="kind-row" hidden>Регистрирам<select id="kind"><option value="office">Счетоводна кантора</option><option value="company">Фирма (финансово управление)</option></select></label>
+  <label id="office-row" hidden><span id="office-label">Име на кантората</span><input id="office" name="office" autocomplete="organization"></label>
+  <label>Имейл<input id="email" name="email" type="email" autocomplete="username" ></label>
+  <label>Парола<input id="password" name="password" type="password" autocomplete="current-password" ></label>
   <div class="err" id="err" role="alert"></div>
   <button id="go" type="submit">Вход</button>
-  <button class="link" id="swap" type="button" {{SIGNUP}}>Нова кантора? Създайте акаунт</button>
+  <button class="link" id="swap" type="button" {{SIGNUP}}>Нова кантора или фирма? Създайте акаунт</button>
+  <button class="link" id="forgot" type="button">Забравена парола?</button>
 </form></main>
 <script>
-let reg = false; const $ = id => document.getElementById(id);
-$('swap').onclick = () => { reg = !reg; $('office-row').hidden = !reg; $('go').textContent = reg ? 'Създай акаунт' : 'Вход'; $('swap').textContent = reg ? 'Имам акаунт, към вход' : 'Нова кантора? Създайте акаунт';
-  $('password').autocomplete = reg ? 'new-password' : 'current-password'; $('err').textContent = ''; };
+let mode = location.pathname === '/reset' ? 'reset' : 'login'; const $ = id => document.getElementById(id);
+const row = id => $(id).closest('label');
+function show(){
+  $('office-row').hidden = $('kind-row').hidden = mode !== 'register'; $('office-label').textContent = $('kind').value === 'company' ? 'Име на фирмата' : 'Име на кантората'; row('email').hidden = mode === 'reset'; row('password').hidden = mode === 'forgot';
+  $('go').textContent = {login: 'Вход', register: 'Създай акаунт', forgot: 'Изпрати връзка за нова парола', reset: 'Запази новата парола'}[mode];
+  $('swap').textContent = mode === 'login' ? 'Нова кантора или фирма? Създайте акаунт' : 'Към вход'; $('forgot').hidden = mode !== 'login';
+  row('password').firstChild.textContent = mode === 'reset' ? 'Нова парола (поне 10 знака)' : 'Парола';
+  $('password').autocomplete = mode === 'login' ? 'current-password' : 'new-password'; $('err').textContent = ''; $('err').style.color = '';
+}
+$('swap').onclick = () => { if (mode === 'reset') return location.href = '/login'; mode = mode === 'login' ? 'register' : 'login'; show(); };
+$('kind').onchange = show;
+$('forgot').onclick = () => { mode = 'forgot'; show(); };
 $('f').onsubmit = async e => { e.preventDefault(); $('err').textContent = ''; $('go').disabled = true;
-  try { const r = await fetch(reg ? '/api/register' : '/api/login', { method: 'POST', headers: { 'content-type': 'application/json', 'x-fb': '1' },
-      body: JSON.stringify({ office: $('office').value, email: $('email').value, password: $('password').value }) });
-    if (r.ok) return location.href = '/'; $('err').textContent = (await r.json()).message || 'Неуспешно.'; }
+  const url = {login: '/api/login', register: '/api/register', forgot: '/api/forgot', reset: '/api/reset'}[mode];
+  try { const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-fb': '1' },
+      body: JSON.stringify({ kind: $('kind').value, office: $('office').value, email: $('email').value, password: $('password').value, token: location.hash.slice(1) }) });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && (mode === 'login' || mode === 'register')) return location.href = '/';
+    if (r.ok && mode === 'reset'){ mode = 'login'; history.replaceState(null, '', '/login'); show(); $('err').style.color = 'inherit'; $('err').textContent = 'Паролата е сменена. Влезте с новата.'; }
+    else if (r.ok && mode === 'forgot'){ $('err').style.color = 'inherit'; $('err').textContent = j.mail ? 'Ако има акаунт с този имейл, изпратихме връзка за нова парола.' : 'На този сървър не е настроен имейл. Обърнете се към администратора за смяна на паролата.'; }
+    else $('err').textContent = j.message || 'Неуспешно.'; }
   catch (x) { $('err').textContent = 'Няма връзка със сървъра.'; }
   $('go').disabled = false; };
+show();
 </script></body></html>

@@ -1,0 +1,42 @@
+const assert=require('node:assert'),fs=require('node:fs'),path=require('node:path');const H=require('./helpers');
+const B='http://127.0.0.1:8851';let n=0;const ok=m=>console.log('ok   '+(++n)+'. '+m);const FX=f=>fs.readFileSync(path.join(__dirname,'fixtures',f));
+const client=()=>{let cookie='';return async(method,url,body,o={})=>{const h={...(o.noCsrf?{}:{'x-fb':'1'})};if(cookie)h.cookie=cookie;let b=body;if(body&&!Buffer.isBuffer(body)){b=JSON.stringify(body);h['content-type']='application/json'}
+  const r=await fetch(B+url,{method,headers:h,body:b,redirect:'manual'});const sc=r.headers.get('set-cookie');if(sc)cookie=sc.split(';')[0];const ct=r.headers.get('content-type')||'';return{status:r.status,headers:r.headers,body:ct.includes('json')?await r.json():await r.text()}}};
+(async()=>{
+  const smtp=await H.fakeSMTP(8853);const srv=await H.startServer(8851,{SMTP_HOST:'127.0.0.1',SMTP_PORT:'8853',SMTP_SECURE:'false',SMTP_FROM:'no-reply@kantora.test',BASE_URL:'http://finbridge.test'});
+  try{
+  const A=client(),Bc=client(),anon=client();let r;
+  await A('POST','/api/register',{office:'Кантора А',email:'a@test.bg',password:'parola-parola-1'});await Bc('POST','/api/register',{office:'Кантора Б',email:'b@test.bg',password:'parola-parola-2'});
+  r=await A('PUT','/api/firms/f1',{data:{name:'Фирма Едно',contact:'Петър',address:'petar@firma.test'}});const tok=new URL(r.body.portal).pathname;assert.equal(r.body.stats,false);
+  const tx=(id,date,cp,amount,x={})=>({id,date,cp,desc:'',amount,needsDoc:amount<0,docId:null,...x});
+  await A('PUT','/api/period/f1/2026-09',{data:{txs:[tx('t1','2026-09-03','Гориво <i>АД</i>',-50),tx('t2','2026-09-10','Бетон ООД',-700),tx('t3','2026-09-12','Телеком',-20,{docId:'d1'}),tx('t4','2026-09-20','Клиент',1000),tx('t5','2026-09-21','Банка',-5,{needsDoc:false})],docs:[],reminders:[]}});
+  r=await anon('GET',tok);assert(r.body.includes('<h2>септември 2026</h2>')&&r.body.includes('<b>1 от 3</b> плащания са с документ')&&r.body.includes('width:33%'),'progress');
+  assert(r.body.includes('до около 125,00 лв. ДДС')||r.body.includes('до около 125,00 € ДДС'));assert(r.body.includes('Срок за счетоводството: 14.10')&&r.body.includes('изтекъл'));
+  assert.equal((r.body.match(/class="forpay"/g)||[]).length,2);assert(!r.body.includes('Обобщение по банкови движения')&&!r.body.includes('Изпратени от вас')&&!r.body.includes('Въпроси от счетоводителя'));assert(r.body.includes('Гориво &lt;i&gt;АД&lt;/i&gt;')&&r.body.includes('id="camera"'));
+  ok('client page: month progress, deadline, estimated VAT at risk, per-payment buttons; optional sections hidden by default');
+  await A('PUT','/api/firms/f1',{data:{name:'Фирма Едно',contact:'Петър',address:'petar@firma.test',stats:true}});r=await anon('GET',tok);
+  assert(r.body.includes('Обобщение по банкови движения')&&/септември 2026<\/td><td class="num">775,00<\/td><td class="num">1 000,00/.test(r.body)&&/Бетон ООД<\/td><td class="num">700,00/.test(r.body));ok('spending overview appears only when the accountant enables it for the firm');
+  const up=(qs,buf)=>anon('POST',tok+'/upload?'+new URLSearchParams(qs),buf,{noCsrf:true});const pdf=FX('faktura_gorivo.pdf'),csv=FX('izvlechenie_2026-10.csv');
+  assert.equal((await up({name:'f.pdf',kind:'invoice',tx:'t1',period:'2026-09'},pdf)).status,200);assert.equal((await up({name:'izv.csv',kind:'statement',note:'октомври'},csv)).status,200);assert.equal((await up({name:'dogovor.png',kind:'contract'},FX('faktura_naem.png'))).status,200);
+  assert.equal((await up({name:'x.pdf',kind:'bogus',tx:'<bad>',period:'nope'},pdf)).status,200);assert.equal((await up({name:'virus.exe',kind:'statement'},csv)).status,415);assert.equal((await up({name:'bin.csv',kind:'statement'},Buffer.from([65,0,66,0]))).status,415);
+  assert.equal((await up({name:'fake.xlsx',kind:'statement'},csv)).status,415);assert.equal((await up({name:'ok.xlsx',kind:'statement'},FX('izvlechenie.xlsx'))).status,200);assert.equal((await up({name:'izv.csv',kind:'invoice'},csv)).status,415);
+  r=await A('GET','/api/inbox');assert.deepEqual(r.body.map(f=>[f.name,f.kind,f.tx,f.period,f.mime]),[['f.pdf','invoice','t1','2026-09','application/pdf'],['izv.csv','statement','','','text/csv'],['dogovor.png','contract','','','image/png'],['x.pdf','invoice','','','application/pdf'],['ok.xlsx','statement','','','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet']]);
+  const st=r.body[1];r=await A('GET','/api/files/'+st.id);assert(r.headers.get('content-disposition').startsWith('attachment')&&r.headers.get('x-content-type-options')==='nosniff'&&r.body.includes('GORIVO PLUS AD'));assert((await A('GET','/api/files/'+(await A('GET','/api/inbox')).body[0].id)).headers.get('content-disposition').startsWith('inline'));
+  r=await anon('GET',tok);assert(r.body.includes('Изпратени от вас')&&(r.body.match(/получен, чака обработка/g)||[]).length===5);await A('POST','/api/files/'+st.id+'/done');assert((await anon('GET',tok)).body.includes('">обработен</span>'));
+  ok('uploads: category and payment hint stored, statements accepted in bank formats only, mismatched or binary files refused, non-images served as downloads, history shown to the client');
+  const ask=b=>A('POST','/api/questions',b);assert.equal((await ask({firm:'nope',period:'2026-09',tx:'t2',text:'Какво е това?'})).status,404);assert.equal((await ask({firm:'f1',period:'2026-09',tx:'t2',text:'?'})).status,400);assert.equal((await ask({firm:'f1',period:'09-2026',tx:'t2',text:'Какво е това?'})).status,400);
+  r=await ask({firm:'f1',period:'2026-09',tx:'t2',text:'За кой обект е <бетонът>?'});assert.equal(r.status,200);const qid=r.body.id;for(let i=0;i<20&&!smtp.mails.length;i++)await new Promise(r=>setTimeout(r,100));
+  const mt=Buffer.from(smtp.mails[0].body.split('\n\n')[1].replace(/\n/g,''),'base64').toString();assert(smtp.mails[0].cmds.includes('RCPT TO:<petar@firma.test>')&&mt.includes('За кой обект е <бетонът>?')&&mt.includes('http://finbridge.test'+tok)&&mt.includes('Здравейте, Петър!'));
+  r=await anon('GET',tok);assert(r.body.includes('Въпроси от счетоводителя')&&r.body.includes('За кой обект е &lt;бетонът&gt;?')&&r.body.includes('data-q="'+qid+'"')&&/10\.09 · Бетон ООД · 700,00/.test(r.body));
+  const ans=b=>anon('POST',tok+'/answer',b,{noCsrf:true});assert.equal((await ans({id:'x'.repeat(16),text:'нещо'})).status,404);assert.equal((await ans({id:qid,text:'  '})).status,400);assert.equal((await ans({id:qid,text:'За склада в Девня'})).status,200);assert.equal((await ans({id:qid,text:'пак'})).status,404);
+  assert(!(await anon('GET',tok)).body.includes('Въпроси от счетоводителя'));r=await A('GET','/api/questions');assert.deepEqual(r.body.map(x=>[x.firm,x.period,x.tx,x.question,x.answer]),[['f1','2026-09','t2','За кой обект е <бетонът>?','За склада в Девня']]);
+  assert.deepEqual((await Bc('GET','/api/questions')).body,[]);await Bc('POST','/api/questions/'+qid+'/close');assert.equal((await A('GET','/api/questions')).body.length,1);await A('POST','/api/questions/'+qid+'/close');assert.deepEqual((await A('GET','/api/questions')).body,[]);
+  r=await A('GET','/api/backup');assert.deepEqual(r.body.questions.map(x=>[x.question,x.answer,x.status]),[['За кой обект е <бетонът>?','За склада в Девня','closed']]);
+  ok('questions on a payment: e-mailed to the client with the link, answered once from the client page, visible only to the owning office, kept in the backup after closing');
+  assert.equal((await A('GET','/api/kv/rules')).body.exists,false);assert.equal((await A('PUT','/api/kv/rules',{data:{sup:{'507081376':{acc:'302',vatMode:'none',name:'Бетон'}},cp:{}}})).status,200);assert.equal((await A('GET','/api/kv/rules')).body.data.sup['507081376'].acc,'302');
+  assert.equal((await Bc('GET','/api/kv/rules')).body.exists,false);assert.equal((await A('PUT','/api/kv/BAD-key',{data:{}})).status,404);assert.equal((await A('GET','/api/backup')).body.rules.sup['507081376'].acc,'302');
+  r=await A('GET','/api/period/f1/2026-09');await A('PUT','/api/period/f1/2026-09',{data:{...r.body.data,closed:'2026-10-15'}});r=await anon('GET',tok);assert(r.body.includes('няма плащания, за които да липсва документ')&&!r.body.includes('class="forpay"'));
+  ok('office rules are stored per office and included in the backup; a month marked closed no longer asks the client for documents');
+  console.log('API3: all '+n+' checks passed');
+  }finally{srv.stop();smtp.close()}
+})().catch(e=>{console.error('API3 FAIL after step '+n+':',(e.message||'').slice(0,900));process.exit(1)});

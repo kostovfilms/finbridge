@@ -1,0 +1,51 @@
+const assert=require('node:assert');const H=require('./helpers');
+const B='http://127.0.0.1:8831';let n=0;const ok=m=>console.log('ok   '+(++n)+'. '+m);
+const client=()=>{let cookie='';return async(method,url,body,o={})=>{const h={...(o.noCsrf?{}:{'x-fb':'1'})};if(cookie)h.cookie=cookie;let b=body;if(body){b=JSON.stringify(body);h['content-type']='application/json'}
+  const r=await fetch(B+url,{method,headers:h,body:b,redirect:'manual'});const sc=r.headers.get('set-cookie');if(sc)cookie=sc.split(';')[0];const ct=r.headers.get('content-type')||'';return{status:r.status,headers:r.headers,body:ct.includes('json')?await r.json():await r.text()}}};
+const mailText=m=>Buffer.from(m.body.split('\n\n')[1].replace(/\n/g,''),'base64').toString();
+(async()=>{
+  const smtp=await H.fakeSMTP(8833);
+  const srv=await H.startServer(8831,{SMTP_HOST:'127.0.0.1',SMTP_PORT:'8833',SMTP_SECURE:'false',SMTP_FROM:'no-reply@kantora.test',BASE_URL:'http://finbridge.test',REMIND_ANYTIME:'true',REMIND_EVERY_DAYS:'3',REMIND_INTERVAL_MS:'3600000'});
+  try{
+  const A=client(),Bc=client(),anon=client();let r;
+  await A('POST','/api/register',{office:'Кантора А',email:'a@test.bg',password:'parola-parola-1'});await Bc('POST','/api/register',{office:'Кантора Б',email:'b@test.bg',password:'parola-parola-2'});
+  r=await A('PUT','/api/firms/f1',{data:{name:'Фирма Едно',contact:'Петър',channel:'Имейл',address:'petar@firma.test',auto:true}});assert.equal(r.body.auto,true);const tok=new URL(r.body.portal).pathname;assert(r.body.portal.startsWith('http://finbridge.test/u/'));
+  await A('PUT','/api/firms/f2',{data:{name:'Фирма Две',address:'maria@firma.test',auto:'yes'}});assert.equal((await A('GET','/api/firms')).body.find(f=>f.id==='f2').auto,false);
+  const tx=(id,date,cp,amount,x={})=>({id,date,cp,desc:'',amount,needsDoc:true,docId:null,...x});
+  await A('PUT','/api/period/f1/2026-09',{data:{txs:[tx('t1','2026-09-03','Гориво АД',-50),tx('t2','2026-09-10','Бетон ООД',-700),tx('t3','2026-09-12','Телеком',-20,{docId:'d1'}),tx('t4','2026-09-15','Банка',-5,{needsDoc:false})],docs:[],reminders:[]}});
+  const cur=new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Sofia',year:'numeric',month:'2-digit'}).format(new Date()).slice(0,7);
+  await A('PUT','/api/period/f1/'+cur,{data:{txs:[tx('c1',cur+'-02','Текущ Месец ООД',-99)],docs:[],reminders:[]}});
+  await A('PUT','/api/period/f2/2026-09',{data:{txs:[tx('m1','2026-09-04','Друга',-10)],docs:[],reminders:[]}});
+  r=await anon('GET',tok);assert.equal((r.body.match(/class="nodoc"/g)||[]).length,3);assert(r.body.includes('Липсват документи за 3 плащания'));
+  const reply=(b)=>anon('POST',tok+'/reply',b,{noCsrf:true});
+  assert.equal((await reply({period:'2026-09',tx:'t1',note:' '})).status,400);assert.equal((await reply({period:'2026-09',tx:'t3',note:'има фактура'})).status,404);assert.equal((await reply({period:'2026-09',tx:'zzz',note:'няма такова'})).status,404);
+  assert.equal((await reply({period:'2026-09',tx:'t1',note:'лично плащане <b>без</b> фактура'})).status,200);assert.equal((await reply({period:'2026-09',tx:'t1',note:'пак'})).status,409);
+  r=await anon('GET',tok);assert(r.body.includes('(изпратено обяснение)')&&r.body.includes('Липсват документи за 2 плащания'));
+  r=await A('GET','/api/replies');assert.equal(r.body.length,1);assert.deepEqual([r.body[0].firm,r.body[0].period,r.body[0].tx,r.body[0].note],['f1','2026-09','t1','лично плащане <b>без</b> фактура']);const rid=r.body[0].id;
+  assert.deepEqual((await Bc('GET','/api/replies')).body,[]);await Bc('POST','/api/replies/'+rid+'/done');assert.equal((await A('GET','/api/replies')).body.length,1);ok('client reply "no document": validated, one per payment, visible only to the owning office');
+  r=await A('POST','/api/remind-now');assert.equal(r.body.sent,1);assert.equal(smtp.mails.length,1);const m=smtp.mails[0],text=mailText(m);
+  assert(m.cmds.includes('RCPT TO:<petar@firma.test>')&&/^Reply-To: a@test.bg$/m.test(m.body));
+  assert(text.includes('Здравейте, Петър!')&&text.includes('септември 2026')&&text.includes('1 плащане')&&text.includes('Бетон ООД, 700,00 €')&&!text.includes('Гориво АД')&&!text.includes('Текущ Месец')&&!text.includes('Телеком')&&text.includes('http://finbridge.test'+tok),text);
+  assert.equal((await A('POST','/api/remind-now')).body.sent,0);assert.equal(smtp.mails.length,1);r=await A('GET','/api/firms');assert.equal(r.body.find(f=>f.id==='f1').lastAuto,new Date().toISOString().slice(0,10));assert(!('lastAuto' in r.body.find(f=>f.id==='f2')));
+  ok('automatic reminder: only firms with the switch on, only closed months, skips payments the client explained, includes the upload link, respects the interval');
+  await A('POST','/api/replies/'+rid+'/done');assert.deepEqual((await A('GET','/api/replies')).body,[]);assert.equal(((await anon('GET',tok)).body.match(/class="nodoc"/g)||[]).length,3);
+  assert.equal((await A('POST','/api/users',{email:'k@test.bg',password:'kratka'})).status,400);assert.equal((await A('POST','/api/users',{email:'b@test.bg',password:'dostatachno-dalga'})).status,409);assert.equal((await A('POST','/api/users',{email:'K@test.bg',password:'dostatachno-dalga'})).status,200);
+  const K=client();assert.equal((await K('POST','/api/login',{email:'k@test.bg',password:'dostatachno-dalga'})).status,200);assert.equal((await K('GET','/api/firms')).body.length,2);
+  r=await A('GET','/api/users');assert.deepEqual(r.body.map(u=>[u.email,u.me]),[['a@test.bg',true],['k@test.bg',false]]);const kid=r.body[1].id,aid=r.body[0].id;
+  assert.equal((await Bc('DELETE','/api/users/'+kid)).status,404);assert.equal((await A('DELETE','/api/users/'+aid)).status,400);assert.equal((await A('DELETE','/api/users/'+kid)).status,200);assert.equal((await K('GET','/api/firms')).status,401);
+  ok('team: add a colleague, shared access, removal ends their session, no cross-office removal, no self-removal');
+  const A2=client();await A2('POST','/api/login',{email:'a@test.bg',password:'parola-parola-1'});assert.equal((await A('POST','/api/password',{old:'greshna',next:'nova-parola-123'})).status,400);assert.equal((await A('POST','/api/password',{old:'parola-parola-1',next:'kratka'})).status,400);
+  assert.equal((await A('POST','/api/password',{old:'parola-parola-1',next:'nova-parola-123'})).status,200);assert.equal((await A('GET','/api/me')).status,200);assert.equal((await A2('GET','/api/me')).status,401);
+  assert.equal((await client()('POST','/api/login',{email:'a@test.bg',password:'parola-parola-1'})).status,401);ok('password change: needs the current password, keeps this session, ends the others');
+  assert.equal((await anon('POST','/api/forgot',{email:'nikoi@test.bg'})).status,200);await new Promise(r=>setTimeout(r,200));assert.equal(smtp.mails.length,1);
+  assert.equal((await anon('POST','/api/forgot',{email:'A@test.bg'})).status,200);for(let i=0;i<20&&smtp.mails.length<2;i++)await new Promise(r=>setTimeout(r,100));
+  const link=/http:\/\/finbridge\.test\/reset#([A-Za-z0-9_-]{40,})/.exec(mailText(smtp.mails[1]));assert(link);
+  assert.equal((await anon('POST','/api/reset',{token:'x'.repeat(43),password:'oshte-edna-parola'})).status,400);assert.equal((await anon('POST','/api/reset',{token:link[1],password:'kratka'})).status,400);
+  assert.equal((await anon('POST','/api/reset',{token:link[1],password:'oshte-edna-parola'})).status,200);assert.equal((await anon('POST','/api/reset',{token:link[1],password:'treta-parola-123'})).status,400);
+  assert.equal((await A('GET','/api/me')).status,401);assert.equal((await A('POST','/api/login',{email:'a@test.bg',password:'oshte-edna-parola'})).status,200);
+  r=await anon('GET','/reset');assert.equal(r.status,200);ok('forgotten password: no account enumeration, one-hour single-use link by email, all sessions ended');
+  r=await A('GET','/api/backup');assert(r.headers.get('content-disposition').includes('attachment'));assert.deepEqual([r.body.office,r.body.firms.length,r.body.periods.length,r.body.periods.find(p=>p.period==='2026-09'&&p.firm==='f1').txs.length],['Кантора А',2,3,4]);
+  assert.deepEqual((await Bc('GET','/api/backup')).body.firms,[]);assert.equal((await anon('GET','/api/backup')).status,401);ok('backup download contains the office data and nothing from other offices');
+  console.log('API2: all '+n+' checks passed');
+  }finally{srv.stop();smtp.close()}
+})().catch(e=>{console.error('API2 FAIL after step '+n+':',(e.message||'').slice(0,900));process.exit(1)});
