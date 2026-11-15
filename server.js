@@ -276,7 +276,8 @@ function finClean(type, d){
   if (!f.party || !f.date || !f.amount) bad(400, 'bad_data', 'Попълнете дата, контрагент и сума.');
   return f;
 }
-const finOut = r => { const d = JSON.parse(r.data); return Object.assign({ id: r.id, type: r.type, status: r.status, owner: r.owner, by: d.by, created: r.created, updated: r.updated, file: d.file ? { name: d.file.name } : null, log: d.log || [], paidAt: d.paidAt || '', bankTx: d.bankTx || '', noAuto: !!d.noAuto, skip: d.skip || [] }, d.f); };
+const paidSum = d => Math.round((d.pays || []).reduce((s, p) => s + p.amount, 0) * 100) / 100;
+const finOut = r => { const d = JSON.parse(r.data); return Object.assign({ paid: paidSum(d), pays: d.pays || [], id: r.id, type: r.type, status: r.status, owner: r.owner, by: d.by, created: r.created, updated: r.updated, file: d.file ? { name: d.file.name } : null, log: d.log || [], paidAt: d.paidAt || '', bankTx: d.bankTx || '', noAuto: !!d.noAuto, skip: d.skip || [] }, d.f); };
 const BANKKEY = /^\d{4}-\d{2}\/[A-Za-z0-9_-]{1,60}$/;
 function bankTxs(O, F){
   const out = [];
@@ -288,6 +289,13 @@ function bankTxs(O, F){
 }
 /* Документът на записа носи към счетоводителя подсказка за кое банково плащане е. */
 function hintFile(O, d, key){ const i = key.indexOf('/'); if (d.file) q("UPDATE files SET tx_hint = ?, period_hint = ? WHERE id = ? AND office_id = ? AND status = 'new'").run(key.slice(i + 1), key.slice(0, i), d.file.id, O); }
+/* Записва вноска; връща true, когато с нея записът е изплатен изцяло. */
+function addPay(d, amount, date, bank, who){
+  (d.pays = d.pays || []).push({ date, amount, bank: bank || '' }); d.log.push({ at: now(), who, what: 'part', note: amount.toFixed(2) });
+  if (d.f.amount - paidSum(d) > 0.011) return false;
+  d.paidAt = date; d.log.push({ at: now(), who, what: 'paid', note: 'изплатено на вноски' }); return true;
+}
+const bankUsed = (O, F, key) => q('SELECT data FROM fin WHERE office_id = ? AND firm_id = ?').all(O, F).some(x => { const d = JSON.parse(x.data); return d.bankTx === key || (d.pays || []).some(p => p.bank === key); });
 /* Затваря еднозначно засечените с банката записи и връща предложенията за останалите. */
 function finSync(O, F){
   const rows = q("SELECT * FROM fin WHERE office_id = ? AND firm_id = ? AND type != 'budget'").all(O, F), txs = rows.length ? bankTxs(O, F) : [];
@@ -295,8 +303,10 @@ function finSync(O, F){
   const res = Fin.matchBank(rows.map(finOut), txs, Core.nameSim);
   for (const a of res.auto){
     const r = rows.find(x => x.id === a.id), d = JSON.parse(r.data);
-    d.bankTx = a.key; d.paidAt = a.date; d.log.push({ at: now(), who: 'Банково извлечение', what: 'paid', note: 'засечено автоматично' });
-    q('UPDATE fin SET data = ?, status = ?, updated = ? WHERE id = ?').run(JSON.stringify(d), 'paid', now(), r.id); hintFile(O, d, a.key);
+    let status = 'paid';
+    if (a.part){ if (a.amount > d.f.amount - paidSum(d) + 0.011) continue; if (!addPay(d, a.amount, a.date, a.key, 'Банково извлечение')) status = r.status; }
+    else { d.bankTx = a.key; d.paidAt = a.date; d.log.push({ at: now(), who: 'Банково извлечение', what: 'paid', note: 'засечено автоматично' }); }
+    q('UPDATE fin SET data = ?, status = ?, updated = ? WHERE id = ?').run(JSON.stringify(d), status, now(), r.id); r.data = JSON.stringify(d); r.status = status; hintFile(O, d, a.key);
   }
   return res;
 }
@@ -335,7 +345,7 @@ async function finApi(req, res, url, user){
     q('INSERT INTO fin(id, office_id, firm_id, type, status, owner, data, created, updated) VALUES(?,?,?,?,?,?,?,?,?)').run(id, O, F, type, FIN_START[type], user.id, JSON.stringify({ f, by: who, log: [{ at: t, who, what: 'created' }] }), t, t);
     return send(res, 200, getOut(id));
   }
-  if ((a = /^\/api\/fin\/items\/([A-Za-z0-9_-]{8,40})(\/status|\/file|\/skip)?$/.exec(p))){
+  if ((a = /^\/api\/fin\/items\/([A-Za-z0-9_-]{8,40})(\/status|\/file|\/skip|\/pay)?$/.exec(p))){
     const r = q('SELECT * FROM fin WHERE id = ? AND office_id = ? AND firm_id = ?').get(a[1], O, F);
     if (!r || (role === 'member' && r.owner !== user.id)) bad(404, 'not_found', 'Записът не е намерен.');
     const d = JSON.parse(r.data), mine = r.owner === user.id, locked = r.status === 'paid' || r.status === 'void';
@@ -344,6 +354,7 @@ async function finApi(req, res, url, user){
     if (!a[2] && m === 'PUT'){
       if (!canEdit) deny();
       d.f = finClean(r.type, (await readJson(req)).data || {}); d.log.push({ at: now(), who, what: 'edited' });
+      if (paidSum(d) > 0 && d.f.amount - paidSum(d) <= 0.011) bad(400, 'bad_data', 'Сумата трябва да е по-голяма от вече платеното (' + paidSum(d).toFixed(2) + ').');
       save(r, d, r.status === 'rejected' ? 'submitted' : r.status); return send(res, 200, getOut(r.id));
     }
     if (!a[2] && m === 'DELETE'){
@@ -366,6 +377,22 @@ async function finApi(req, res, url, user){
       if (old && old.status === 'held'){ fs.rmSync(path.join(DATA, 'files', old.id), { force: true }); q('DELETE FROM files WHERE id = ?').run(old.id); }
       d.file = { id, name: q('SELECT name FROM files WHERE id = ?').get(id).name }; save(r, d, r.status); return send(res, 200, getOut(r.id));
     }
+    if (a[2] === '/pay' && m === 'POST'){
+      if (role === 'member') deny();
+      if (!((r.type === 'invoice' && r.status === 'open') || (r.type === 'bill' && r.status === 'approved'))) bad(409, 'bad_state', 'Частично плащане се записва по неплатена фактура към клиент или по одобрена фактура от доставчик.');
+      const b = await readJson(req), rem = Math.round((d.f.amount - paidSum(d)) * 100) / 100;
+      let amount = Math.round((+String(b.amount).replace(',', '.') || 0) * 100) / 100, date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') && !isNaN(Date.parse(b.date)) ? b.date : sofiaDay(), key = '';
+      if (b.bank != null){
+        const tx = BANKKEY.test(String(b.bank)) && bankTxs(O, F).find(t => t.key === b.bank);
+        if (!tx || Math.sign(tx.amount) !== (r.type === 'invoice' ? 1 : -1)) bad(409, 'no_tx', 'Това банково плащане не отговаря на записа.');
+        if (bankUsed(O, F, tx.key)) bad(409, 'bank_used', 'Това банково плащане вече е отнесено към друг запис.');
+        amount = Math.round(Math.abs(tx.amount) * 100) / 100; date = tx.date; key = tx.key;
+      }
+      if (!(amount > 0)) bad(400, 'bad_data', 'Въведете платената сума.');
+      if (amount > rem + 0.011) bad(400, 'too_much', 'Сумата надвишава остатъка от ' + rem.toFixed(2) + '.');
+      const done = addPay(d, amount, date, key, who); if (key) hintFile(O, d, key);
+      save(r, d, done ? 'paid' : r.status); return send(res, 200, getOut(r.id));
+    }
     if (a[2] === '/skip' && m === 'POST'){
       if (role === 'member' || r.type === 'budget') deny();
       const key = String((await readJson(req)).bank || ''); if (!BANKKEY.test(key)) bad(400, 'bad_id');
@@ -378,8 +405,8 @@ async function finApi(req, res, url, user){
         /* Потвърждение по конкретно банково плащане: то трябва да съществува, да е със същата сума и да не е вързано другаде. */
         if (role === 'member' || r.type === 'budget') deny();
         tx = BANKKEY.test(String(b.bank)) && bankTxs(O, F).find(t => t.key === b.bank);
-        if (!tx || Math.sign(tx.amount) !== (r.type === 'invoice' ? 1 : -1) || Math.abs(Math.abs(tx.amount) - d.f.amount) > 0.011) bad(409, 'no_tx', 'Това банково плащане не отговаря на записа.');
-        if (q("SELECT data FROM fin WHERE office_id = ? AND firm_id = ? AND id != ?").all(O, F, r.id).some(x => JSON.parse(x.data).bankTx === tx.key)) bad(409, 'bank_used', 'Това банково плащане вече е отнесено към друг запис.');
+        if (!tx || Math.sign(tx.amount) !== (r.type === 'invoice' ? 1 : -1) || Math.abs(Math.abs(tx.amount) - (d.f.amount - paidSum(d))) > 0.011) bad(409, 'no_tx', 'Това банково плащане не отговаря на записа.');
+        if (bankUsed(O, F, tx.key)) bad(409, 'bank_used', 'Това банково плащане вече е отнесено към друг запис.');
         note = 'потвърдено по банково плащане';
       }
       if (r.type === 'invoice'){ if (role === 'member') deny(); ok = (from === 'open' && (to === 'paid' || to === 'void')) || (from !== 'open' && to === 'open'); }
@@ -395,7 +422,11 @@ async function finApi(req, res, url, user){
       d.log.push({ at: now(), who, what: to, note }); if (d.log.length > 50) d.log.splice(1, d.log.length - 50);
       d.paidAt = to === 'paid' ? (tx ? tx.date : /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : sofiaDay()) : '';
       /* Върнат запис, който е бил засечен с банката, не се затваря повторно сам и не се предлага за същото плащане. */
-      if (from === 'paid' && d.bankTx){ d.noAuto = true; d.skip = [...new Set((d.skip || []).concat(d.bankTx))].slice(-20); }
+      if (from === 'paid'){
+        const keys = [d.bankTx].concat((d.pays || []).map(p => p.bank)).filter(Boolean);
+        if (keys.length){ d.noAuto = true; d.skip = [...new Set((d.skip || []).concat(keys))].slice(-20); }
+        d.pays = [];
+      }
       if (tx){ d.bankTx = tx.key; hintFile(O, d, tx.key); } else delete d.bankTx;
       if (to === 'approved' && d.file) q("UPDATE files SET status = 'new' WHERE id = ? AND office_id = ? AND status = 'held'").run(d.file.id, O);
       save(r, d, to);

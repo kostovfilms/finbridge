@@ -67,4 +67,18 @@ t('payment reminder text for an overdue invoice',()=>{
   assert(s.includes('фактура № 0000000051 от 01.10.2026 на стойност 1 234,50 € беше с падеж 15.10.2026 и към днес е просрочена с 31 дни.')&&s.endsWith('Поздрави,\nВарна Строй ООД'),s);
   assert(Fin.dunningText(it('i1','invoice','open',5,{date:'2026-11-14',due:''}),'Х','€','2026-11-15').includes('фактура от 14.11.2026 на стойност 5,00 € беше с падеж 14.11.2026 и към днес е просрочена с 1 ден.'));
 });
+t('partial payments: instalments with the invoice number apply on their own up to the balance, name-only ones are offered, totals use the balance left',()=>{
+  const items=[it('i1','invoice','open',1200,{party:'Гама ЕООД',number:'0000001234',date:'2026-11-01',due:'2026-11-10'}),it('i2','invoice','open',900,{party:'Делта ООД',date:'2026-11-01',paid:300,pays:[{date:'2026-11-05',amount:300,bank:'2026-11/p0'}]}),
+    it('b1','bill','approved',5000,{party:'Бетон Трейд ООД',date:'2026-11-02',due:'2026-11-20'}),it('b2','bill','submitted',800,{party:'Наем Техника ООД',number:'777',date:'2026-11-02'}),it('e1','expense','approved',100,{party:'OMV',pay:'card',date:'2026-11-10'})];
+  const txs=[tx('p0','2026-11-05','DELTA OOD',300),tx('p1','2026-11-06','NEPOZNAT',400,'f-ra 1234'),tx('p2','2026-11-08','GAMA EOOD',500,'faktura 0000001234'),tx('p3','2026-11-12','GAMA',400,'po f 1234'),
+    tx('p4','2026-11-09','DELTA OOD',600),tx('p5','2026-11-10','BETON TREYD OOD',-2000),tx('p6','2026-11-11','NEPOZNAT',-50),tx('p7','2026-11-11','NAEM TEHNIKA',-300,'f 777'),tx('p8','2026-11-11','OMV',-40)];
+  const r=Fin.matchBank(items,txs,Core.nameSim),k=x=>x.id+'>'+x.key.split('/')[1]+(x.part?'~':'');
+  assert.deepEqual(r.auto.map(k).sort(),['i1>p1~','i1>p2~','i2>p4']);assert.deepEqual(r.auto.find(a=>a.key.endsWith('p1')),{id:'i1',key:'2026-11/p1',date:'2026-11-06',amount:400,part:true});
+  assert.deepEqual(r.suggest.map(k).sort(),['b1>p5~','b2>p7~']);
+  const paidUp=items.map(i=>i.id==='i1'?{...i,paid:900,pays:[{bank:'2026-11/p1'},{bank:'2026-11/p2'}]}:i);assert.deepEqual(Fin.matchBank(paidUp,[tx('p9','2026-11-13','GAMA EOOD',300)],Core.nameSim).auto.map(k),['i1>p9']);
+  assert.equal(Fin.left(items[1]),600);assert.deepEqual([Fin.summary(items).recvSum,Fin.summary(items).paySum,Fin.summary(items).waitSum],[1800,5000,800]);
+  const a=Fin.aging(items,'2026-11-15');assert.deepEqual([a.total,a.d30,a.overdue.map(i=>[i.id,i.left])],[1800,1800,[['i2',600],['i1',1200]]]);
+  assert.deepEqual(Fin.forecast(items,{balance:0},'2026-11-15',1).map(w=>[w.in,w.out]),[[1800,5800]]);
+  assert(Fin.dunningText(items[1],'Х','€','2026-11-15').includes('на стойност 900,00 €, от които остават за плащане 600,00 €, беше с падеж'));
+});
 console.log('FIN: all '+n+' tests passed');

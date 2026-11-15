@@ -51,7 +51,13 @@ const B='http://127.0.0.1:8871',FX=f=>path.join(__dirname,'fixtures',f);let n=0;
   await c.click('#nav a:has-text("Вземания")');t=await c.locator('tr:has-text("Клиент АД")').innerText();assert(t.includes('на 25.01.2026 · по банковото извлечение'),t);
   await o.click('#nav a:has-text("Разходи")');await o.click('#nav a:has-text("Табло")');await o.waitForSelector('text=Прогноза за 8 седмици');t=await txt(o);assert(!t.includes('наличността става отрицателна')&&t.includes('няма просрочени'),t);
   await c.click('a:has-text("Към счетоводната част")');await c.waitForSelector('tr:has-text("Варна Строй ООД")');
+  await o.click('#nav a:has-text("Вземания")');await o.click('button:has-text("Нова издадена фактура")');await o.fill('#item-form [name=party]','Гама ЕООД');await o.fill('#item-form [name=number]','0000001234');await o.fill('#item-form [name=amount]','1200');await o.click('#item-form button[type=submit]');await o.waitForSelector('tr:has-text("Гама ЕООД")');
+  await o.click('tr:has-text("Гама ЕООД") button:has-text("Частично плащане")');await o.fill('#pay-form [name=amount]','5000');await o.click('#pay-form button[type=submit]');await o.waitForSelector('text=Сумата надвишава остатъка от 1200.00');
+  await o.fill('#pay-form [name=amount]','450,50');await o.click('#pay-form button[type=submit]');await o.waitForSelector('text=Плащането е записано');t=await o.locator('tr:has-text("Гама ЕООД")').innerText();assert(t.includes('платени 450,50 · остават 749,50')&&t.includes('частично платена')&&t.includes('Получен остатъкът'),t);
+  await o.click('#nav a:has-text("Табло")');await o.waitForSelector('.tile:has-text("Вземания") b:has-text("749,50 €")');
+  await o.click('#nav a:has-text("Вземания")');await o.click('tr:has-text("Гама ЕООД") button:has-text("Частично плащане")');await o.fill('#pay-form [name=amount]','749,50');await o.click('#pay-form button[type=submit]');await o.waitForSelector('tr:has-text("Гама ЕООД") .pill:has-text("Платен")');
   ok('a bank statement saved by the accountant marks the approved bill paid on its own; the uncertain incoming payment is offered and confirmed with one click; the owner\'s forecast no longer goes negative');
+  ok('partial payments in the browser: over-payment refused, balance shown on the row and the dashboard, the last instalment closes the invoice');
   assert.deepEqual(errs,[]);ok('no console or page errors');console.log('E2E company: all '+n+' steps passed');
   }catch(e){if(page)await page.screenshot({path:'/tmp/e2e-company-fail.png'}).catch(()=>{});throw e}finally{await b.close();srv.stop()}
 })().catch(e=>{console.error('E2E company FAIL after step '+n+':',(e.message||'').slice(0,1500));process.exit(1)});
