@@ -499,6 +499,19 @@ const Core = (() => {
     return csv(rows);
   }
 
+  /* Контировки за покупките и плащанията по тях: дебит по зададената сметка, 4531 ДДС на покупките, кредит 401 Доставчици; плащане 401 срещу 503. */
+  function exportPostings(P, dec){
+    const rows = [['Дата', 'Вид документ', 'Номер', 'Контрагент', 'ЕИК', 'Основание', 'Дебит', 'Кредит', 'Сума']];
+    for (const d of P.docs.filter(d => d.docType === 'invoice' || d.docType === 'credit_note').sort((a, b) => (a.date || '').localeCompare(b.date || ''))){
+      const head = [fd(d.date), TYPES[d.docType], d.number, d.supplier, d.supplierEik], what = d.subject || (d.lines && d.lines[0] ? d.lines[0].name : '') || 'Покупка', mode = d.vatMode || 'full';
+      if (mode === 'none' || !d.vat) rows.push(head.concat([what, d.acc || '', '401', num(d.total, dec)]));
+      else { rows.push(head.concat([what, d.acc || '', '401', num(d.base, dec)])); rows.push(head.concat(['ДДС по покупка' + (mode === 'partial' ? ' (частичен данъчен кредит)' : ''), '4531', '401', num(d.vat, dec)])); }
+      const t = d.txId ? P.txs.find(t => t.id === d.txId) : null;
+      if (t) rows.push([fd(t.date), 'Банково плащане', d.number, d.supplier, d.supplierEik, 'Плащане по ' + TYPES[d.docType].toLowerCase() + ' ' + (d.number || ''), '401', '503', num(d.total != null ? d.total : Math.abs(t.amount), dec)]);
+    }
+    return csv(rows);
+  }
+
   const MONTHS = ['януари','февруари','март','април','май','юни','юли','август','септември','октомври','ноември','декември'];
   const periodLabel = p => MONTHS[+p.slice(5, 7) - 1] + ' ' + p.slice(0, 4);
   function shiftPeriod(p, n){ const d = new Date(Date.UTC(+p.slice(0, 4), +p.slice(5, 7) - 1 + n, 1)); return d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1); }
@@ -574,7 +587,7 @@ const Core = (() => {
   }
 
   return {r2, parseAmount, parseDate, splitCSV, parseTable, parseMT940, parseCamt, parseStatement, classify, withKeys, nameSim, nameTokens,
-    findMatches, decideMatch, docOk, validateDoc, CATS, CAT_LABEL, ACCOUNTS, VATM, supplierKey, cpKey, codingFor, findGroup, exportLedger, eikValid, encode1251, COLS, DEFAULT_COLS, TYPES, periodLabel, shiftPeriod, deadline, cur, fd, money, reminderText, exportDocs, exportLines, exportMissing, dayDiff};
+    findMatches, decideMatch, docOk, validateDoc, CATS, CAT_LABEL, ACCOUNTS, VATM, supplierKey, cpKey, codingFor, findGroup, exportLedger, exportPostings, eikValid, encode1251, COLS, DEFAULT_COLS, TYPES, periodLabel, shiftPeriod, deadline, cur, fd, money, reminderText, exportDocs, exportLines, exportMissing, dayDiff};
 })();
 /*CORE-END*/
 
@@ -1131,7 +1144,7 @@ function vReminders(){
     (hist ? '<div class="panel"><div class="scroll"><table><thead><tr><th class="num">Изпратено</th><th>Канал</th><th>Обхват</th><th>Резултат</th></tr></thead><tbody>' + hist + '</tbody></table></div></div>' : '');
 }
 
-const EXPORTS = {docs: ['Документи и плащания', 'dokumenti', Core.exportDocs], ledger: ['Дневник на покупките (работен)', 'dnevnik_pokupki', Core.exportLedger], lines: ['Редове по документи', 'redove', Core.exportLines], missing: ['Плащания без документ', 'lipsvashti', Core.exportMissing]};
+const EXPORTS = {docs: ['Документи и плащания', 'dokumenti', Core.exportDocs], ledger: ['Дневник на покупките (работен)', 'dnevnik_pokupki', Core.exportLedger], post: ['Контировки за покупките', 'kontirovki_pokupki', Core.exportPostings], lines: ['Редове по документи', 'redove', Core.exportLines], missing: ['Плащания без документ', 'lipsvashti', Core.exportMissing]};
 function exportData(){ const f = curFirm(); return EXPORTS[S.exp][2](P(f.id), S.dec, S.exp === 'docs' ? S.ecfg : null); }
 function saveEcfg(){ pref('ecfg', JSON.stringify(S.ecfg)); }
 function exportSetup(){
@@ -1160,6 +1173,7 @@ function vExport(){
     '<button class="btn' + (downloads ? '' : ' primary') + '" data-act="copy-exp"' + (n ? '' : ' disabled') + '>' + (S.copied === 'exp' ? 'Копирано' : 'Копирай съдържанието') + '</button></div>' +
     (p.txs.length || p.docs.length ? '<div class="tools"><button class="btn" data-act="' + (p.closed ? 'reopen-period">Отвори месеца отново' : 'close-period">Отбележи месеца като приключен') + '</button>' +
       (p.closed ? '<span class="dim">Приключен на ' + D(p.closed) + '. Автоматичните напомняния за него са спрени.</span>' : '') + '</div>' : '') +
+    (window.FB ? '<div class="tools" id="sales-exports"><a class="btn" href="/api/fin/export?kind=ledger&amp;firm=' + encodeURIComponent(f.id) + '&amp;period=' + S.period + '&amp;dec=' + (S.dec === '.' ? '.' : ',') + '">Дневник на продажбите</a><a class="btn" href="/api/fin/export?kind=postings&amp;firm=' + encodeURIComponent(f.id) + '&amp;period=' + S.period + '&amp;dec=' + (S.dec === '.' ? '.' : ',') + '">Контировки за продажбите</a><span class="dim">От фактурите, които фирмата издава във финансовата си част.</span></div>' : '') +
     '<div class="dim">Файлът е общ CSV. Ако счетоводната ви програма изисква собствен шаблон за импорт, колоните се подреждат по него.</div>';
 }
 

@@ -81,4 +81,17 @@ t('partial payments: instalments with the invoice number apply on their own up t
   assert.deepEqual(Fin.forecast(items,{balance:0},'2026-11-15',1).map(w=>[w.in,w.out]),[[1800,5800]]);
   assert(Fin.dunningText(items[1],'Х','€','2026-11-15').includes('на стойност 900,00 €, от които остават за плащане 600,00 €, беше с падеж'));
 });
+t('invoice totals, sales ledger and sales postings',()=>{
+  assert.deepEqual(Fin.invoiceTotals([{qty:2,price:10.555},{qty:1.5,price:100}],20),{rows:[{qty:2,price:10.555,sum:21.11},{qty:1.5,price:100,sum:150}],net:171.11,vat:34.22,total:205.33});
+  assert.deepEqual([Fin.invoiceTotals([{qty:3,price:9.99}],0).total,Fin.invoiceTotals([],20).total,Fin.invoiceTotals([{qty:1,price:100}],9).vat],[29.97,0,9]);
+  const inv=(id,number,date,net,rate,x={})=>it(id,'invoice','open',Math.round(net*(100+rate))/100,{party:'Клиент '+id,number,date,pay:'bank',inv:{buyer:{eik:'20000000'+id.slice(1),vatNo:rate?'BG20000000'+id.slice(1):''},lines:[{name:'Услуга '+id}],rate,net,vat:Math.round(net*rate)/100,vatNote:rate?'':'чл. 113, ал. 9 от ЗДДС',rev:'703'},...x});
+  const items=[inv('i2','0000000002','2026-11-05',100,20,{status:'paid',paidAt:'2026-11-20'}),inv('i1','0000000001','2026-11-03',1000,20,{paid:400,pays:[{date:'2026-11-10',amount:400,bank:''},{date:'2026-12-01',amount:100,bank:''}]}),
+    inv('i3','0000000003','2026-11-07',50,0,{status:'void'}),inv('i4','0000000004','2026-11-08',200,9,{pay:'cash',status:'paid',paidAt:'2026-11-08'}),inv('i5','0000000005','2026-12-01',70,20),
+    it('m1','invoice','paid',300,{party:'Ръчна',number:'77',date:'2026-10-01',paidAt:'2026-11-15'}),it('b1','bill','paid',999,{paidAt:'2026-11-15'})];
+  assert.deepEqual(Fin.salesLedger(items,'2026-11').slice(1),[[1,'Фактура','0000000001','03.11.2026','BG200000001','Клиент i1','Услуга i1','1000,00','20%','200,00','1200,00','',''],[2,'Фактура','0000000002','05.11.2026','BG200000002','Клиент i2','Услуга i2','100,00','20%','20,00','120,00','',''],
+    [3,'Фактура','0000000003','07.11.2026','200000003','Клиент i3','Услуга i3','0,00','0%','0,00','0,00','чл. 113, ал. 9 от ЗДДС','Анулирана'],[4,'Фактура','0000000004','08.11.2026','BG200000004','Клиент i4','Услуга i4','200,00','9%','18,00','218,00','','']]);
+  assert.deepEqual(Fin.salesPostings(items,'2026-11','.').slice(1).map(r=>[r[0],r[2],r[6],r[7],r[8]]),[['03.11.2026','0000000001','411','703','1000.00'],['03.11.2026','0000000001','411','4532','200.00'],['05.11.2026','0000000002','411','703','100.00'],['05.11.2026','0000000002','411','4532','20.00'],
+    ['08.11.2026','0000000004','501','703','200.00'],['08.11.2026','0000000004','501','4532','18.00'],['10.11.2026','0000000001','503','411','400.00'],['15.11.2026','77','503','411','300.00'],['20.11.2026','0000000002','503','411','120.00']]);
+  assert.equal(Fin.salesLedger(items,'2026-09').length,1);
+});
 console.log('FIN: all '+n+' tests passed');

@@ -296,6 +296,7 @@ function addPay(d, amount, date, bank, who){
   d.paidAt = date; d.log.push({ at: now(), who, what: 'paid', note: 'изплатено на вноски' }); return true;
 }
 const bankUsed = (O, F, key) => q('SELECT data FROM fin WHERE office_id = ? AND firm_id = ?').all(O, F).some(x => { const d = JSON.parse(x.data); return d.bankTx === key || (d.pays || []).some(p => p.bank === key); });
+const lastInvoiceNo = (O, F) => q("SELECT data FROM fin WHERE office_id = ? AND firm_id = ? AND type = 'invoice'").all(O, F).reduce((mx, x) => { const f = JSON.parse(x.data).f; return f.inv ? Math.max(mx, +f.number || 0) : mx; }, 0);
 /* Затваря еднозначно засечените с банката записи и връща предложенията за останалите. */
 function finSync(O, F){
   const rows = q("SELECT * FROM fin WHERE office_id = ? AND firm_id = ? AND type != 'budget'").all(O, F), txs = rows.length ? bankTxs(O, F) : [];
@@ -325,7 +326,7 @@ async function finApi(req, res, url, user){
     const sync = finSync(O, F);
     let items = q('SELECT * FROM fin WHERE office_id = ? AND firm_id = ? ORDER BY created DESC').all(O, F).map(finOut);
     if (role === 'member') items = items.filter(i => i.type === 'budget' || (i.type === 'expense' && i.owner === user.id));
-    const out = { firm: { id: F, name: JSON.parse(firm.data).name }, me: { id: user.id, email: user.email, name: user.name, role, office: !user.firm_id }, solo: !!user.solo, settings: set, items, cur: Core.cur(sofiaDay().slice(0, 7)), today: sofiaDay() };
+    const out = { firm: { id: F, name: JSON.parse(firm.data).name, eik: JSON.parse(firm.data).eik || '' }, me: { id: user.id, email: user.email, name: user.name, role, office: !user.firm_id }, solo: !!user.solo, settings: set, items, cur: Core.cur(sofiaDay().slice(0, 7)), today: sofiaDay() };
     if (role !== 'member'){
       out.bank = q('SELECT period, data FROM periods WHERE office_id = ? AND firm_id = ? ORDER BY period DESC LIMIT 6').all(O, F).map(r => { let d; try { d = JSON.parse(r.data); } catch (e) { d = {}; }
         const sum = sign => (d.txs || []).reduce((s, t) => s + (Math.sign(t.amount) === sign ? Math.abs(+t.amount || 0) : 0), 0); return { period: r.period, label: Core.periodLabel(r.period), out: Math.round(sum(-1) * 100) / 100, in: Math.round(sum(1) * 100) / 100 }; });
@@ -351,13 +352,15 @@ async function finApi(req, res, url, user){
     const d = JSON.parse(r.data), mine = r.owner === user.id, locked = r.status === 'paid' || r.status === 'void';
     const canEdit = !locked && (role === 'owner' || (mine && (r.status === 'submitted' || r.status === 'rejected')) || (role === 'approver' && (r.type === 'bill' || r.type === 'invoice')));
     const fileRow = () => d.file && q('SELECT * FROM files WHERE id = ? AND office_id = ?').get(d.file.id, O);
+    const issuedLock = () => { if (d.f.inv) bad(403, 'issued', 'Издадена фактура не се променя и не се изтрива. Анулирайте я и издайте нова.'); };
     if (!a[2] && m === 'PUT'){
-      if (!canEdit) deny();
+      issuedLock(); if (!canEdit) deny();
       d.f = finClean(r.type, (await readJson(req)).data || {}); d.log.push({ at: now(), who, what: 'edited' });
       if (paidSum(d) > 0 && d.f.amount - paidSum(d) <= 0.011) bad(400, 'bad_data', 'Сумата трябва да е по-голяма от вече платеното (' + paidSum(d).toFixed(2) + ').');
       save(r, d, r.status === 'rejected' ? 'submitted' : r.status); return send(res, 200, getOut(r.id));
     }
     if (!a[2] && m === 'DELETE'){
+      issuedLock();
       if (!canEdit && !(role === 'owner' && r.type === 'budget')) deny();
       const f = fileRow(); if (f && f.status === 'held'){ fs.rmSync(path.join(DATA, 'files', f.id), { force: true }); q('DELETE FROM files WHERE id = ?').run(f.id); }
       q('DELETE FROM fin WHERE id = ?').run(r.id); return send(res, 200, { ok: true });
@@ -442,8 +445,50 @@ async function finApi(req, res, url, user){
     const cats = (Array.isArray(b.cats) ? b.cats : []).map(c => String(c).replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 60)).filter(Boolean).slice(0, 40);
     const bal = Math.round((+String(b.balance).replace(',', '.') || 0) * 100) / 100;
     const data = { balance: Math.abs(bal) < 1e10 ? bal : 0, balanceDate: /^\d{4}-\d{2}-\d{2}$/.test(b.balanceDate || '') ? b.balanceDate : sofiaDay(), approverLimit: n(b.approverLimit), receiptOver: n(b.receiptOver), cats: cats.length ? [...new Set(cats)] : Fin.DEFAULTS.cats };
+    const sv = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, n), sb = b.seller;
+    data.seller = sb && typeof sb === 'object' ? { eik: sv(sb.eik, 15).replace(/\s/g, ''), vatNo: sv(sb.vatNo, 20).replace(/\s/g, '').toUpperCase(), address: sv(sb.address, 200), mol: sv(sb.mol, 80), iban: sv(sb.iban, 42).replace(/\s/g, '').toUpperCase(), bank: sv(sb.bank, 80), bic: sv(sb.bic, 15).toUpperCase() } : set.seller || {};
+    if (data.seller.eik && !/^\d{9,13}$/.test(data.seller.eik)) bad(400, 'bad_eik', 'ЕИК трябва да е от 9 до 13 цифри.');
+    data.invNext = set.invNext || 1;
+    if (b.invNext != null && String(b.invNext).trim() !== ''){
+      const nx = Math.floor(+b.invNext), last = lastInvoiceNo(O, F);
+      if (!(nx >= 1 && nx <= 9999999999)) bad(400, 'bad_data', 'Номерът на следващата фактура трябва да е число от 1 до 9999999999.');
+      if (nx <= last) bad(400, 'bad_data', 'Вече има издадена фактура с номер ' + last + '. Следващият номер трябва да е по-голям.');
+      data.invNext = nx;
+    }
     q('INSERT INTO finset(office_id, firm_id, data) VALUES(?,?,?) ON CONFLICT(office_id, firm_id) DO UPDATE SET data = excluded.data').run(O, F, JSON.stringify(data));
     return send(res, 200, data);
+  }
+  if (p === '/api/fin/invoices' && m === 'POST'){
+    /* Издаване на фактура: номерът се дава от сървъра, поредно и без пропуски; данните на доставчика се запазват към момента на издаване. */
+    if (role === 'member') deny();
+    limit('fin:' + user.id, 300, 3600000);
+    const b = (await readJson(req)).data || {}, sv = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, n), fd = JSON.parse(firm.data), sl = set.seller || {};
+    const date = v => /^\d{4}-\d{2}-\d{2}$/.test(v || '') && !isNaN(Date.parse(v)) ? v : '', dec = (v, k) => Math.round((+String(v == null ? '' : v).replace(',', '.') || 0) * k) / k;
+    const seller = { name: fd.name, eik: sl.eik || fd.eik || '', vatNo: sl.vatNo || '', address: sl.address || '', mol: sl.mol || '', iban: sl.iban || '', bank: sl.bank || '', bic: sl.bic || '' };
+    if (!seller.eik || !seller.address || !seller.mol) bad(400, 'no_seller', 'Първо попълнете данните на фирмата за фактурите в „Екип и правила“: ЕИК, адрес и МОЛ.');
+    const party = sv(b.party, 120), buyer = { eik: sv(b.eik, 15).replace(/\s/g, ''), vatNo: sv(b.vatNo, 20).replace(/\s/g, '').toUpperCase(), address: sv(b.address, 200), mol: sv(b.mol, 80) };
+    if (!party) bad(400, 'bad_data', 'Въведете получател.');
+    if (buyer.eik && !/^\d{9,13}$/.test(buyer.eik)) bad(400, 'bad_eik', 'ЕИК на получателя трябва да е от 9 до 13 цифри.');
+    const lines = (Array.isArray(b.lines) ? b.lines : []).slice(0, 50).map(l => ({ name: sv(l && l.name, 200), unit: sv(l && l.unit, 10) || 'бр.', qty: dec(l && l.qty, 1000), price: dec(l && l.price, 100) })).filter(l => l.name);
+    if (!lines.length || lines.some(l => !(l.qty > 0) || l.price < 0)) bad(400, 'bad_data', 'Всеки ред иска наименование, количество и цена.');
+    const rate = seller.vatNo ? (Fin.RATES.includes(+b.rate) ? +b.rate : 20) : 0, t = Fin.invoiceTotals(lines, rate);
+    if (!(t.total > 0) || t.total >= 1e9) bad(400, 'bad_data', 'Сумата на фактурата трябва да е по-голяма от нула.');
+    const vatNote = rate ? '' : sv(b.vatNote, 120) || (seller.vatNo ? '' : 'чл. 113, ал. 9 от ЗДДС');
+    if (!rate && !vatNote) bad(400, 'need_note', 'При ставка 0% посочете основанието за неначисляване на ДДС.');
+    const day = date(b.date) || sofiaDay(), pay = b.pay === 'cash' ? 'cash' : 'bank', n = Math.max(+set.invNext || 1, lastInvoiceNo(O, F) + 1), id = rid(12), at = now();
+    const f = { party, number: String(n).padStart(10, '0'), date: day, due: date(b.due), amount: t.total, cat: '', budget: '', pay, note: sv(b.note, 300),
+      inv: { buyer, seller, lines: t.rows.map(l => ({ name: l.name, unit: l.unit, qty: l.qty, price: l.price, sum: l.sum })), rate, net: t.net, vat: t.vat, vatNote, rev: Fin.REV[b.rev] ? String(b.rev) : '703' } };
+    const d = { f, by: who, log: [{ at, who, what: 'issued' }] }; if (pay === 'cash') d.paidAt = day;
+    q('INSERT INTO fin(id, office_id, firm_id, type, status, owner, data, created, updated) VALUES(?,?,?,?,?,?,?,?,?)').run(id, O, F, 'invoice', pay === 'cash' ? 'paid' : 'open', user.id, JSON.stringify(d), at, at);
+    q('INSERT INTO finset(office_id, firm_id, data) VALUES(?,?,?) ON CONFLICT(office_id, firm_id) DO UPDATE SET data = excluded.data').run(O, F, JSON.stringify(Object.assign({}, set, { invNext: n + 1 })));
+    return send(res, 200, getOut(id));
+  }
+  if (p === '/api/fin/export' && m === 'GET'){
+    if (role === 'member') deny();
+    const period = url.searchParams.get('period') || '', kind = url.searchParams.get('kind') === 'postings' ? 'postings' : 'ledger', dc = url.searchParams.get('dec') === '.' ? '.' : ',';
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) bad(400, 'bad_period', 'Невалиден месец.');
+    const items = q("SELECT * FROM fin WHERE office_id = ? AND firm_id = ? AND type = 'invoice'").all(O, F).map(finOut);
+    return send(res, 200, Fin.toCsv(kind === 'postings' ? Fin.salesPostings(items, period, dc) : Fin.salesLedger(items, period, dc)), { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="' + (kind === 'postings' ? 'kontirovki_prodazhbi_' : 'dnevnik_prodazhbi_') + period + '.csv"', 'Cache-Control': 'private, no-store' });
   }
   if (p === '/api/fin/users'){
     if (role !== 'owner') deny();
