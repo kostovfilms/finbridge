@@ -276,7 +276,30 @@ function finClean(type, d){
   if (!f.party || !f.date || !f.amount) bad(400, 'bad_data', 'Попълнете дата, контрагент и сума.');
   return f;
 }
-const finOut = r => { const d = JSON.parse(r.data); return Object.assign({ id: r.id, type: r.type, status: r.status, owner: r.owner, by: d.by, created: r.created, updated: r.updated, file: d.file ? { name: d.file.name } : null, log: d.log || [], paidAt: d.paidAt || '' }, d.f); };
+const finOut = r => { const d = JSON.parse(r.data); return Object.assign({ id: r.id, type: r.type, status: r.status, owner: r.owner, by: d.by, created: r.created, updated: r.updated, file: d.file ? { name: d.file.name } : null, log: d.log || [], paidAt: d.paidAt || '', bankTx: d.bankTx || '', noAuto: !!d.noAuto, skip: d.skip || [] }, d.f); };
+const BANKKEY = /^\d{4}-\d{2}\/[A-Za-z0-9_-]{1,60}$/;
+function bankTxs(O, F){
+  const out = [];
+  for (const r of q('SELECT period, data FROM periods WHERE office_id = ? AND firm_id = ? ORDER BY period DESC LIMIT 6').all(O, F)){
+    let d; try { d = JSON.parse(r.data); } catch (e) { continue; }
+    for (const t of d.txs || []) if (t && /^[A-Za-z0-9_-]{1,60}$/.test(t.id || '') && /^\d{4}-\d{2}-\d{2}$/.test(t.date || '') && +t.amount) out.push({ key: r.period + '/' + t.id, date: t.date, cp: String(t.cp || ''), desc: String(t.desc || ''), amount: +t.amount });
+  }
+  return out;
+}
+/* Документът на записа носи към счетоводителя подсказка за кое банково плащане е. */
+function hintFile(O, d, key){ const i = key.indexOf('/'); if (d.file) q("UPDATE files SET tx_hint = ?, period_hint = ? WHERE id = ? AND office_id = ? AND status = 'new'").run(key.slice(i + 1), key.slice(0, i), d.file.id, O); }
+/* Затваря еднозначно засечените с банката записи и връща предложенията за останалите. */
+function finSync(O, F){
+  const rows = q("SELECT * FROM fin WHERE office_id = ? AND firm_id = ? AND type != 'budget'").all(O, F), txs = rows.length ? bankTxs(O, F) : [];
+  if (!txs.length) return { auto: [], suggest: [] };
+  const res = Fin.matchBank(rows.map(finOut), txs, Core.nameSim);
+  for (const a of res.auto){
+    const r = rows.find(x => x.id === a.id), d = JSON.parse(r.data);
+    d.bankTx = a.key; d.paidAt = a.date; d.log.push({ at: now(), who: 'Банково извлечение', what: 'paid', note: 'засечено автоматично' });
+    q('UPDATE fin SET data = ?, status = ?, updated = ? WHERE id = ?').run(JSON.stringify(d), 'paid', now(), r.id); hintFile(O, d, a.key);
+  }
+  return res;
+}
 function finSettings(O, F){ const r = q('SELECT data FROM finset WHERE office_id = ? AND firm_id = ?').get(O, F); return Object.assign({}, Fin.DEFAULTS, r ? JSON.parse(r.data) : {}); }
 async function finApi(req, res, url, user){
   const p = url.pathname, m = req.method, O = user.office_id, F = user.firm_id || url.searchParams.get('firm') || '';
@@ -289,12 +312,14 @@ async function finApi(req, res, url, user){
   const getOut = id => finOut(q('SELECT * FROM fin WHERE id = ?').get(id));
   let a;
   if (p === '/api/fin/state' && m === 'GET'){
+    const sync = finSync(O, F);
     let items = q('SELECT * FROM fin WHERE office_id = ? AND firm_id = ? ORDER BY created DESC').all(O, F).map(finOut);
     if (role === 'member') items = items.filter(i => i.type === 'budget' || (i.type === 'expense' && i.owner === user.id));
     const out = { firm: { id: F, name: JSON.parse(firm.data).name }, me: { id: user.id, email: user.email, name: user.name, role, office: !user.firm_id }, solo: !!user.solo, settings: set, items, cur: Core.cur(sofiaDay().slice(0, 7)), today: sofiaDay() };
     if (role !== 'member'){
       out.bank = q('SELECT period, data FROM periods WHERE office_id = ? AND firm_id = ? ORDER BY period DESC LIMIT 6').all(O, F).map(r => { let d; try { d = JSON.parse(r.data); } catch (e) { d = {}; }
         const sum = sign => (d.txs || []).reduce((s, t) => s + (Math.sign(t.amount) === sign ? Math.abs(+t.amount || 0) : 0), 0); return { period: r.period, label: Core.periodLabel(r.period), out: Math.round(sum(-1) * 100) / 100, in: Math.round(sum(1) * 100) / 100 }; });
+      out.suggest = sync.suggest;
       out.missing = missingFor(O, F).filter(x => !x.replied).length; out.portal = origin(req) + '/u/' + firm.portal_token;
     }
     return send(res, 200, out);
@@ -310,7 +335,7 @@ async function finApi(req, res, url, user){
     q('INSERT INTO fin(id, office_id, firm_id, type, status, owner, data, created, updated) VALUES(?,?,?,?,?,?,?,?,?)').run(id, O, F, type, FIN_START[type], user.id, JSON.stringify({ f, by: who, log: [{ at: t, who, what: 'created' }] }), t, t);
     return send(res, 200, getOut(id));
   }
-  if ((a = /^\/api\/fin\/items\/([A-Za-z0-9_-]{8,40})(\/status|\/file)?$/.exec(p))){
+  if ((a = /^\/api\/fin\/items\/([A-Za-z0-9_-]{8,40})(\/status|\/file|\/skip)?$/.exec(p))){
     const r = q('SELECT * FROM fin WHERE id = ? AND office_id = ? AND firm_id = ?').get(a[1], O, F);
     if (!r || (role === 'member' && r.owner !== user.id)) bad(404, 'not_found', 'Записът не е намерен.');
     const d = JSON.parse(r.data), mine = r.owner === user.id, locked = r.status === 'paid' || r.status === 'void';
@@ -341,21 +366,37 @@ async function finApi(req, res, url, user){
       if (old && old.status === 'held'){ fs.rmSync(path.join(DATA, 'files', old.id), { force: true }); q('DELETE FROM files WHERE id = ?').run(old.id); }
       d.file = { id, name: q('SELECT name FROM files WHERE id = ?').get(id).name }; save(r, d, r.status); return send(res, 200, getOut(r.id));
     }
+    if (a[2] === '/skip' && m === 'POST'){
+      if (role === 'member' || r.type === 'budget') deny();
+      const key = String((await readJson(req)).bank || ''); if (!BANKKEY.test(key)) bad(400, 'bad_id');
+      d.skip = [...new Set((d.skip || []).concat(key))].slice(-20); save(r, d, r.status); return send(res, 200, { ok: true });
+    }
     if (a[2] === '/status' && m === 'POST'){
-      const b = await readJson(req), to = String(b.status || ''), note = String(b.note || '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 300), from = r.status, item = finOut(r);
-      let ok = false;
+      const b = await readJson(req), to = String(b.status || ''), from = r.status, item = finOut(r);
+      let ok = false, tx = null, note = String(b.note || '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 300);
+      if (b.bank != null && to === 'paid'){
+        /* Потвърждение по конкретно банково плащане: то трябва да съществува, да е със същата сума и да не е вързано другаде. */
+        if (role === 'member' || r.type === 'budget') deny();
+        tx = BANKKEY.test(String(b.bank)) && bankTxs(O, F).find(t => t.key === b.bank);
+        if (!tx || Math.sign(tx.amount) !== (r.type === 'invoice' ? 1 : -1) || Math.abs(Math.abs(tx.amount) - d.f.amount) > 0.011) bad(409, 'no_tx', 'Това банково плащане не отговаря на записа.');
+        if (q("SELECT data FROM fin WHERE office_id = ? AND firm_id = ? AND id != ?").all(O, F, r.id).some(x => JSON.parse(x.data).bankTx === tx.key)) bad(409, 'bank_used', 'Това банково плащане вече е отнесено към друг запис.');
+        note = 'потвърдено по банково плащане';
+      }
       if (r.type === 'invoice'){ if (role === 'member') deny(); ok = (from === 'open' && (to === 'paid' || to === 'void')) || (from !== 'open' && to === 'open'); }
       else if (r.type !== 'budget'){
         if (to === 'approved' || to === 'rejected'){
           const c = Fin.canApprove(item, me, set); if (!c.ok) bad(403, 'forbidden', c.why);
           if (to === 'rejected' && note.length < 2) bad(400, 'need_reason', 'Напишете причина за отказа.');
           ok = from === 'submitted';
-        } else if (to === 'paid'){ if (role === 'member') deny(); ok = from === 'approved'; }
+        } else if (to === 'paid'){ if (role === 'member') deny(); ok = from === 'approved' || (!!tx && r.type === 'bill' && from === 'submitted' && Fin.canApprove(item, me, set).ok); }
         else if (to === 'submitted') ok = from !== 'submitted' && (role === 'owner' || (from === 'rejected' && mine));
       }
       if (!ok) bad(409, 'bad_state', 'Това действие не е възможно в текущото състояние.');
       d.log.push({ at: now(), who, what: to, note }); if (d.log.length > 50) d.log.splice(1, d.log.length - 50);
-      d.paidAt = to === 'paid' ? (/^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : sofiaDay()) : '';
+      d.paidAt = to === 'paid' ? (tx ? tx.date : /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : sofiaDay()) : '';
+      /* Върнат запис, който е бил засечен с банката, не се затваря повторно сам и не се предлага за същото плащане. */
+      if (from === 'paid' && d.bankTx){ d.noAuto = true; d.skip = [...new Set((d.skip || []).concat(d.bankTx))].slice(-20); }
+      if (tx){ d.bankTx = tx.key; hintFile(O, d, tx.key); } else delete d.bankTx;
       if (to === 'approved' && d.file) q("UPDATE files SET status = 'new' WHERE id = ? AND office_id = ? AND status = 'held'").run(d.file.id, O);
       save(r, d, to);
       const u = !mine && (to === 'approved' || to === 'rejected') && SMTP.host && SMTP.from && q('SELECT email FROM users WHERE id = ?').get(r.owner);
@@ -600,6 +641,7 @@ async function handle(req, res){
       const v = (cur ? cur.version : 0) + 1;
       q('INSERT INTO periods(office_id, firm_id, period, data, version, updated) VALUES(?,?,?,?,?,?) ON CONFLICT(office_id, firm_id, period) DO UPDATE SET data = excluded.data, version = excluded.version, updated = excluded.updated')
         .run(O, firm, per, JSON.stringify(d), v, now());
+      try { finSync(O, firm); } catch (e) { console.error(now(), 'засичане на финансите с банката:', e); }
       return send(res, 200, { version: v });
     }
     if (m === 'DELETE'){ q('DELETE FROM periods WHERE office_id = ? AND firm_id = ? AND period = ?').run(O, firm, per); return send(res, 200, { ok: true }); }

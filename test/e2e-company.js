@@ -3,7 +3,7 @@ const B='http://127.0.0.1:8871',FX=f=>path.join(__dirname,'fixtures',f);let n=0;
 (async()=>{
   const srv=await H.startServer(8871,{});const b=await chromium.launch({executablePath:process.env.CHROME||'/usr/bin/google-chrome'});
   try{
-  const errs=[];const open=async(vp)=>{const ctx=await b.newContext({viewport:vp||{width:1280,height:900},acceptDownloads:true});const p=await ctx.newPage();p.on('pageerror',e=>errs.push(e.message));p.on('console',m=>{if(m.type()==='error'&&!/Failed to load resource/.test(m.text()))errs.push(m.text())});return p};
+  const errs=[];const open=async(vp)=>{const ctx=await b.newContext({viewport:vp||{width:1280,height:900},acceptDownloads:true,permissions:['clipboard-read','clipboard-write']});const p=await ctx.newPage();p.on('pageerror',e=>errs.push(e.message));p.on('console',m=>{if(m.type()==='error'&&!/Failed to load resource/.test(m.text()))errs.push(m.text())});return p};
   const login=async(p,email)=>{await p.goto(B+'/login');await p.fill('#email',email);await p.fill('#password',PW);await p.click('#go');await p.waitForSelector('#nav a')};
   const o=page=await open();const txt=p=>p.locator('#main').innerText();
   await o.goto(B+'/');await o.waitForURL(/\/login/);await o.click('#swap');await o.selectOption('#kind','company');assert.equal(await o.locator('#office-label').innerText(),'Име на фирмата');
@@ -31,16 +31,27 @@ const B='http://127.0.0.1:8871',FX=f=>path.join(__dirname,'fixtures',f);let n=0;
   await o.selectOption('#f-status','rejected');assert.equal(await o.locator('tbody tr').count(),1);await o.selectOption('#f-status','');await o.fill('#f-q','omv');assert.equal(await o.locator('tbody tr').count(),1);assert.equal(await o.evaluate(()=>document.activeElement.id),'f-q');
   const [dl]=await Promise.all([o.waitForEvent('download'),o.click('button:has-text("Изтегли CSV")')]);const csv=fs.readFileSync(await dl.path(),'utf8');assert(csv.startsWith('﻿Дата;Търговец')&&csv.includes('OMV Варна')&&csv.includes('150,5;Гориво и транспорт;Лични средства;Платен;Иван'),csv);
   await o.click('#nav a:has-text("Плащания")');await o.click('tr:has-text("Бетон Трейд ООД") button:has-text("Одобри")');await o.waitForSelector('tr:has-text("Бетон Трейд ООД") .pill:has-text("Одобрен")');
+  await o.click('#nav a:has-text("Вземания")');await o.click('tr:has-text("Клиент АД") button:has-text("Копирай напомняне")');await o.waitForSelector('text=Текстът на напомнянето е копиран');t=await o.evaluate(()=>navigator.clipboard.readText());
+  assert(t.includes('фактура от 02.01.2026 на стойност 900,00 € беше с падеж 16.01.2026')&&t.endsWith('Варна Строй ООД'),t);
   await o.click('#nav a:has-text("Табло")');await o.waitForSelector('text=Прогноза за 8 седмици');t=await txt(o);
   assert(t.includes('5 000,00 €')&&t.includes('наличността става отрицателна')&&t.includes('-300,00')&&t.includes('Просрочени вземания')&&t.includes('Клиент АД')&&t.includes('150,50 € от 200,00 €')&&t.includes('остават 49,50 €')&&t.includes('Гориво и транспорт'),t);
-  ok('owner approves and reimburses, filters and exports CSV, approves the bill; the dashboard shows balance, an 8-week forecast going negative, overdue receivables and budget use');
+  ok('owner approves and reimburses, filters and exports CSV, approves the bill, copies a payment reminder for the overdue invoice; the dashboard shows balance, an 8-week forecast going negative, overdue receivables and budget use');
   const doc=await o.request.get(B+'/api/fin/items/'+(await o.evaluate(async()=>(await (await fetch('/api/fin/state')).json()).items.find(i=>i.party==='OMV Варна').id))+'/file');assert.equal(doc.headers()['content-type'],'image/png');
   await o.click('#nav a:has-text("Екип и правила")');await o.fill('#user-form [name=email]','acc@kantora.test');await o.fill('#user-form [name=password]',PW);await o.selectOption('#user-form [name=role]','accountant');await o.click('#user-form button[type=submit]');await o.waitForSelector('tr:has-text("acc@kantora.test"):has-text("Счетоводител")');
   const c=await open();await c.goto(B+'/login');await c.fill('#email','acc@kantora.test');await c.fill('#password',PW);await c.click('#go');await c.waitForSelector('tr:has-text("Варна Строй ООД")');
   await c.goto(B+'/#inbox');await c.waitForSelector('text=2 нови файла');t=await c.locator('#main').innerText();assert(t.includes('Разход: OMV Варна')&&t.includes('Фактура от доставчик: Бетон Трейд ООД'),t);
   await c.goto(B+'/#clients');await c.click('button:has-text("Редактирай")');await c.click('#fin-link');await c.waitForSelector('text=Преглеждате финансите на фирмата като счетоводител');assert.deepEqual(await c.locator('#nav a').allInnerTexts(),['Табло','Разходи','Плащания','Вземания','Бюджети']);
-  await c.click('#nav a:has-text("Вземания")');await c.click('tr:has-text("Клиент АД") button:has-text("Получено плащане")');await c.waitForSelector('tr:has-text("Клиент АД") .pill:has-text("Платен")');await c.click('a:has-text("Към счетоводната част")');await c.waitForSelector('tr:has-text("Варна Строй ООД")');
   ok('the invited accountant gets the accounting app with both documents already in the inbox, and can open the firm\'s finances from the client form');
+  assert.equal(await c.locator('#bank-suggest').count(),0);
+  await c.evaluate(async()=>{const id=(await (await fetch('/api/firms')).json())[0].id,tx=(i,date,cp,amount)=>({id:i,date,cp,desc:'',amount,needsDoc:amount<0,docId:null});
+    const r=await fetch('/api/period/'+id+'/2026-01',{method:'PUT',headers:{'x-fb':'1','content-type':'application/json'},body:JSON.stringify({data:{txs:[tx('t1','2026-01-22','BETON TREYD OOD',-6200),tx('t2','2026-01-25','NEPOZNAT PLATETS',900)],docs:[]}})});if(!r.ok)throw new Error('period '+r.status)});
+  await c.reload();await c.waitForSelector('#bank-suggest');t=await c.locator('#bank-suggest').innerText();assert(t.includes('25.01.2026 · NEPOZNAT PLATETS · 900,00 €')&&t.includes('Вземане: Клиент АД')&&t.includes('само сумата съвпада')&&!t.includes('BETON'),t);
+  await c.click('#bank-suggest button:has-text("Потвърди плащането")');await c.waitForSelector('text=Отбелязано като платено по банковото извлечение');assert.equal(await c.locator('#bank-suggest').count(),0);
+  await c.click('#nav a:has-text("Плащания")');t=await c.locator('tr:has-text("Бетон Трейд ООД")').innerText();assert(t.includes('Платен')&&t.includes('на 22.01.2026 · по банковото извлечение'),t);
+  await c.click('#nav a:has-text("Вземания")');t=await c.locator('tr:has-text("Клиент АД")').innerText();assert(t.includes('на 25.01.2026 · по банковото извлечение'),t);
+  await o.click('#nav a:has-text("Разходи")');await o.click('#nav a:has-text("Табло")');await o.waitForSelector('text=Прогноза за 8 седмици');t=await txt(o);assert(!t.includes('наличността става отрицателна')&&t.includes('няма просрочени'),t);
+  await c.click('a:has-text("Към счетоводната част")');await c.waitForSelector('tr:has-text("Варна Строй ООД")');
+  ok('a bank statement saved by the accountant marks the approved bill paid on its own; the uncertain incoming payment is offered and confirmed with one click; the owner\'s forecast no longer goes negative');
   assert.deepEqual(errs,[]);ok('no console or page errors');console.log('E2E company: all '+n+' steps passed');
   }catch(e){if(page)await page.screenshot({path:'/tmp/e2e-company-fail.png'}).catch(()=>{});throw e}finally{await b.close();srv.stop()}
 })().catch(e=>{console.error('E2E company FAIL after step '+n+':',(e.message||'').slice(0,1500));process.exit(1)});

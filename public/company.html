@@ -129,8 +129,38 @@ const Fin = (() => {
     const wait = i => spend(i) && i.status === 'submitted', pay = i => (i.type === 'bill' && i.status === 'approved') || (i.type === 'expense' && i.pay === 'own' && i.status === 'approved');
     return { waitN: n(wait), waitSum: sum(wait), payN: n(pay), paySum: sum(pay), recvSum: sum(i => i.type === 'invoice' && i.status === 'open') };
   }
+  /* Засичане с банката: плащане от извлечението затваря запис само при една възможна двойка с еднаква сума, близка дата и съвпадение по име или номер.
+     Всичко останало се връща като предложение за потвърждение от човек. sim(a, b) връща сходство на имена от 0 до 1. */
+  const numKey = s => String(s || '').replace(/\D/g, '').replace(/^0+/, '');
+  function matchBank(items, txs, sim){
+    const used = new Set(items.map(i => i.bankTx).filter(Boolean)), free = txs.filter(t => !used.has(t.key)), pairs = [];
+    const elig = i => !i.bankTx && ((i.type === 'invoice' && i.status === 'open') || (i.type === 'bill' && (i.status === 'submitted' || i.status === 'approved')) || (i.type === 'expense' && i.status === 'approved' && (i.pay === 'card' || i.pay === 'bank')));
+    for (const i of items){
+      if (!elig(i)) continue;
+      const sign = i.type === 'invoice' ? 1 : -1, win = i.type === 'expense' ? [-1, 7] : [-3, 120], num = numKey(i.number);
+      for (const t of free){
+        if (Math.sign(t.amount) !== sign || Math.abs(Math.abs(t.amount) - i.amount) > 0.011 || (i.skip || []).includes(t.key)) continue;
+        const lag = dayDiff(t.date, i.date); if (lag < win[0] || lag > win[1]) continue;
+        const text = t.cp + ' ' + (t.desc || ''), byNum = num.length >= 3 && (text.match(/\d+/g) || []).some(x => x.replace(/^0+/, '') === num);
+        pairs.push({ i, t, lag, strong: byNum || sim(i.party, text) >= 0.5 });
+      }
+    }
+    const n = (list, f, k) => list.filter(p => f(p) === k).length, strong = pairs.filter(p => p.strong), byI = p => p.i.id, byT = p => p.t.key;
+    const auto = strong.filter(p => n(strong, byI, p.i.id) === 1 && n(strong, byT, p.t.key) === 1 && !p.i.noAuto && !(p.i.type === 'bill' && p.i.status !== 'approved'));
+    const doneI = new Set(auto.map(byI)), doneT = new Set(auto.map(byT));
+    const rest = pairs.filter(p => !doneI.has(p.i.id) && !doneT.has(p.t.key) && (p.strong || (n(pairs, byI, p.i.id) === 1 && n(pairs, byT, p.t.key) === 1)));
+    rest.sort((a, b) => (b.strong - a.strong) || b.t.date.localeCompare(a.t.date) || a.lag - b.lag);
+    return { auto: auto.map(p => ({ id: p.i.id, key: p.t.key, date: p.t.date })), suggest: rest.slice(0, 30).map(p => ({ id: p.i.id, key: p.t.key, date: p.t.date, cp: p.t.cp, amount: p.t.amount, strong: p.strong })) };
+  }
+  const fmtDate = d => d ? d.slice(8, 10) + '.' + d.slice(5, 7) + '.' + d.slice(0, 4) : '';
+  /* Готов текст за напомняне към клиент с просрочена фактура. */
+  function dunningText(i, firm, cur, today){
+    const due = i.due || i.date, late = dayDiff(today, due);
+    return 'Здравейте,\n\nнапомняме Ви, че фактура' + (i.number ? ' № ' + i.number : '') + ' от ' + fmtDate(i.date) + ' на стойност ' + money(i.amount) + ' ' + cur + ' беше с падеж ' + fmtDate(due) +
+      (late > 0 ? ' и към днес е просрочена с ' + late + (late === 1 ? ' ден' : ' дни') : '') + '.\nМолим да наредите плащането. Ако вече сте платили, моля изпратете ни платежното нареждане.\n\nПоздрави,\n' + firm;
+  }
   function toCsv(rows){ return '﻿' + rows.map(r => r.map(c => { const s = String(c == null ? '' : c); return /[";\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(';')).join('\r\n'); }
-  return { CATS, DEFAULTS, PAY, STATUS, ROLES, r2, addDays, dayDiff, money, canApprove, budgetUsage, violations, forecast, aging, byCat, summary, toCsv };
+  return { CATS, DEFAULTS, PAY, STATUS, ROLES, r2, addDays, dayDiff, money, canApprove, budgetUsage, violations, forecast, aging, byCat, summary, toCsv, matchBank, dunningText, fmtDate };
 })();
 /*FIN-END*/
 
@@ -150,7 +180,9 @@ async function api(method, url, body, raw){
   return j;
 }
 const S = { view: 'dash', st: null, form: null, msg: null, filter: { status: '', q: '' }, users: null, busy: false };
-const dm = d => d ? d.slice(8, 10) + '.' + d.slice(5, 7) + '.' + d.slice(0, 4) : '';
+const dm = Fin.fmtDate;
+async function copy(text){ try { await navigator.clipboard.writeText(text); } catch (e) { const t = document.createElement('textarea'); t.value = text; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); } }
+const KIND = { invoice: 'Вземане', bill: 'Фактура за плащане', expense: 'Разход' };
 const m = n => Fin.money(n) + ' ' + S.st.cur;
 const role = () => S.st.me.role;
 const VIEWS = [['dash', 'Табло', r => r !== 'member'], ['expense', 'Разходи', () => true], ['bill', 'Плащания', r => r !== 'member'], ['invoice', 'Вземания', r => r !== 'member'], ['budget', 'Бюджети', r => r !== 'member'], ['team', 'Екип и правила', r => r === 'owner']];
@@ -181,7 +213,7 @@ function rowActs(i){
   let h = '';
   if (i.file) h += '<a class="btn small" target="_blank" rel="noopener" href="' + esc(withFirm('/api/fin/items/' + i.id + '/file')) + '">Документ</a>';
   if (i.type === 'invoice'){
-    if (i.status === 'open') h += b('paid', 'Получено плащане', 'pri') + b('void', 'Анулирай');
+    if (i.status === 'open') h += b('paid', 'Получено плащане', 'pri') + (Fin.dayDiff(S.st.today, i.due || i.date) > 0 ? b('dun', 'Копирай напомняне') : '') + b('void', 'Анулирай');
     else h += b('reopen-inv', 'Върни като неплатена');
   } else {
     if (i.status === 'submitted' && Fin.canApprove(i, S.st.me, S.st.settings).ok) h += b('approve', 'Одобри', 'pri') + b('reject', 'Откажи', 'bad');
@@ -221,7 +253,7 @@ function vList(type){
   h += '<div class="card scroll">' + (list.length ? '<table><thead><tr><th>Дата</th><th>' + t.party + '</th>' + (type !== 'invoice' ? '<th>Категория</th>' : '') + (type !== 'expense' ? '<th>Падеж</th>' : '<th>Подал</th>') + '<th class="num">Сума</th><th>Състояние</th><th></th></tr></thead><tbody>' +
     list.map(i => { const last = i.log.length ? i.log[i.log.length - 1] : null;
       return '<tr><td>' + dm(i.date) + '</td><td>' + esc(i.party) + (i.number ? ' <span class="dim">№ ' + esc(i.number) + '</span>' : '') + (i.note ? '<div class="dim">' + esc(i.note) + '</div>' : '') + '</td>' + (type !== 'invoice' ? '<td>' + esc(i.cat || '') + (type === 'expense' ? '<div class="dim">' + esc(Fin.PAY[i.pay] || '') + '</div>' : '') + '</td>' : '') +
-        '<td>' + (type !== 'expense' ? dm(i.due) : esc(i.by || '')) + '</td><td class="num">' + m(i.amount) + '</td><td>' + pills(i) + (i.status === 'rejected' && last && last.note ? '<div class="dim">Причина: ' + esc(last.note) + '</div>' : '') + (i.status === 'paid' && i.paidAt ? '<div class="dim">на ' + dm(i.paidAt) + '</div>' : '') + '</td><td>' + rowActs(i) + '</td></tr>'; }).join('') +
+        '<td>' + (type !== 'expense' ? dm(i.due) : esc(i.by || '')) + '</td><td class="num">' + m(i.amount) + '</td><td>' + pills(i) + (i.status === 'rejected' && last && last.note ? '<div class="dim">Причина: ' + esc(last.note) + '</div>' : '') + (i.status === 'paid' && i.paidAt ? '<div class="dim">на ' + dm(i.paidAt) + (i.bankTx ? ' · по банковото извлечение' : '') + '</div>' : '') + '</td><td>' + rowActs(i) + '</td></tr>'; }).join('') +
     '</tbody><tfoot><tr><td colspan="' + (type === 'invoice' ? 3 : 4) + '" class="dim">' + list.length + (list.length === 1 ? ' запис' : ' записа') + '</td><td class="num"><b>' + m(total) + '</b></td><td colspan="2"></td></tr></tfoot></table>' : '<div class="empty">' + (all.length ? 'Няма записи по този филтър.' : 'Още няма записи.') + '</div>') + '</div>';
   return h;
 }
@@ -238,8 +270,12 @@ function vDash(){
     '<div class="card tile"><span>Вземания</span><b>' + m(s.recvSum) + '</b><small>' + (ag.overdue.length ? 'просрочени ' + m(Fin.r2(ag.d30 + ag.d60 + ag.older)) : 'няма просрочени') + '</small></div></div>';
   if (low) h += '<div class="note crit">По текущите падежи наличността става отрицателна в седмицата от ' + dm(low.start) + ' (' + m(low.balance) + ').</div>';
   if (st.missing) h += '<div class="note warn">Счетоводителят чака документи за ' + st.missing + (st.missing === 1 ? ' банково плащане' : ' банкови плащания') + '. <a href="' + esc(st.portal) + '" target="_blank" rel="noopener">Качете ги тук</a>.</div>';
+  if (st.suggest && st.suggest.length) h += '<section class="card scroll" id="bank-suggest"><h2>Плащания в банката, които приличат на ваши записи</h2><table><thead><tr><th>В извлечението</th><th>Ваш запис</th><th></th></tr></thead><tbody>' + st.suggest.map(x => { const i = st.items.find(i => i.id === x.id); if (!i) return '';
+    const can = i.status !== 'submitted' || Fin.canApprove(i, st.me, st.settings).ok;
+    return '<tr><td>' + dm(x.date) + ' · ' + esc(x.cp) + ' · <b>' + m(x.amount) + '</b></td><td>' + KIND[i.type] + ': ' + esc(i.party) + (i.number ? ' <span class="dim">№ ' + esc(i.number) + '</span>' : '') + ' <span class="dim">от ' + dm(i.date) + '</span>' + (x.strong ? '' : ' <span class="pill warn">само сумата съвпада</span>') + (i.status === 'submitted' ? ' <span class="pill warn">още не е одобрена</span>' : '') + '</td>' +
+      '<td><div class="acts">' + (can ? '<button class="btn small pri" type="button" data-act="bank-yes" data-id="' + i.id + '" data-bank="' + esc(x.key) + '">Потвърди плащането</button>' : '') + '<button class="btn small" type="button" data-act="bank-no" data-id="' + i.id + '" data-bank="' + esc(x.key) + '">Не е това</button></div></td></tr>'; }).join('') + '</tbody></table><p class="dim">Еднозначните съвпадения се отбелязват като платени сами. Тук са тези, които искат вашето решение.</p></section>';
   h += '<div class="cols"><section class="card scroll" style="grid-column:1/-1"><h2>Прогноза за 8 седмици</h2><table><thead><tr><th>Седмица от</th><th class="num">Постъпления</th><th class="num">Плащания</th><th class="num">Наличност</th><th></th></tr></thead><tbody>' +
-    fc.map(w => '<tr><td>' + dm(w.start).slice(0, 5) + '</td><td class="num">' + (w.in ? Fin.money(w.in) : '') + '</td><td class="num">' + (w.out ? Fin.money(w.out) : '') + '</td><td class="num"><b>' + Fin.money(w.balance) + '</b></td><td style="width:30%"><div class="bar"><i class="' + (w.balance < 0 ? 'over' : '') + '" style="width:' + Math.round(Math.abs(w.balance) / max * 100) + '%"></i></div></td></tr>').join('') + '</tbody></table><p class="dim">Сметката стъпва на въведената наличност, неплатените вземания и задължения по падеж и одобрените разходи за възстановяване.</p></section>';
+    fc.map(w => '<tr><td>' + dm(w.start).slice(0, 5) + '</td><td class="num">' + (w.in ? Fin.money(w.in) : '') + '</td><td class="num">' + (w.out ? Fin.money(w.out) : '') + '</td><td class="num"><b>' + Fin.money(w.balance) + '</b></td><td style="width:30%"><div class="bar"><i class="' + (w.balance < 0 ? 'over' : '') + '" style="width:' + Math.round(Math.abs(w.balance) / max * 100) + '%"></i></div></td></tr>').join('') + '</tbody></table><p class="dim">Сметката стъпва на въведената наличност, неплатените вземания и задължения по падеж и одобрените разходи за възстановяване. Записите, засечени с банката, отпадат от нея.</p></section>';
   h += '<section class="card"><h2>Бюджети за месеца</h2>' + budgetBars() + '</section>';
   h += '<section class="card scroll"><h2>Просрочени вземания</h2>' + (ag.overdue.length ? '<table><tbody>' + ag.overdue.slice(0, 8).map(i => '<tr><td>' + esc(i.party) + (i.number ? ' <span class="dim">№ ' + esc(i.number) + '</span>' : '') + '</td><td class="num">' + m(i.amount) + '</td><td><span class="pill crit">' + i.late + (i.late === 1 ? ' ден' : ' дни') + '</span></td></tr>').join('') + '</tbody></table><p class="dim">До 30 дни: ' + m(ag.d30) + ' · 31 до 60: ' + m(ag.d60) + ' · над 60: ' + m(ag.older) + '</p>' : '<div class="empty">Няма просрочени вземания.</div>') + '</section>';
   h += '<section class="card scroll"><h2>Разходи по категории за месеца</h2>' + (cats.length ? '<table><tbody>' + cats.map(c => '<tr><td>' + esc(c.cat) + '</td><td class="num">' + m(c.sum) + '</td></tr>').join('') + '</tbody></table>' : '<div class="empty">Няма одобрени разходи този месец.</div>') + '</section>';
@@ -274,7 +310,11 @@ function render(){
   const body = S.view === 'dash' ? vDash() : S.view === 'budget' ? vBudget() : S.view === 'team' ? vTeam() : vList(S.view);
   $('main').innerHTML = (st.me.office ? '<div class="note info">Преглеждате финансите на фирмата като счетоводител.</div>' : '') + (S.msg ? '<div class="note ' + S.msg.cls + '" role="status">' + esc(S.msg.text) + '</div>' : '') + body;
 }
-async function go(v){ S.view = v; if (location.hash.slice(1) !== v) history.replaceState(null, '', '#' + v); S.form = null; S.reject = null; S.confirm = null; S.msg = null; S.filter = { status: '', q: '' }; if (v === 'team') try { S.users = await api('GET', '/api/fin/users'); } catch (e) { S.msg = { cls: 'crit', text: e.message }; } render(); }
+async function go(v){ S.view = v; if (location.hash.slice(1) !== v) history.replaceState(null, '', '#' + v); S.form = null; S.reject = null; S.confirm = null; S.msg = null; S.filter = { status: '', q: '' };
+  /* Разделът с формите за екипа се рисува веднъж, след зареждането, за да не се губи въведеното. */
+  if (v !== 'team') render();
+  try { await load(); if (v === 'team') S.users = await api('GET', '/api/fin/users'); } catch (e) { S.msg = { cls: 'crit', text: e.message }; }
+  if (S.view === v && (v === 'team' || (!S.form && !S.reject))) render(); }
 const status = (id, status, note) => api('POST', '/api/fin/items/' + id + '/status', { status, note });
 document.addEventListener('click', e => {
   const nav = e.target.closest('[data-view]'); if (nav){ e.preventDefault(); return go(nav.dataset.view); }
@@ -290,6 +330,9 @@ document.addEventListener('click', e => {
     case 'reject': S.reject = id; S.form = null; return render();
     case 'paid': return act(() => status(id, 'paid'), 'Отбелязано като платено.');
     case 'void': return act(() => status(id, 'void'), 'Фактурата е анулирана.');
+    case 'bank-yes': return act(() => api('POST', '/api/fin/items/' + id + '/status', { status: 'paid', bank: el.dataset.bank }), 'Отбелязано като платено по банковото извлечение.');
+    case 'bank-no': return act(() => api('POST', '/api/fin/items/' + id + '/skip', { bank: el.dataset.bank }));
+    case 'dun': return copy(Fin.dunningText(it, S.st.firm.name, S.st.cur, S.st.today)).then(() => { S.msg = { cls: 'good', text: 'Текстът на напомнянето е копиран. Поставете го в имейл или съобщение до клиента.' }; render(); });
     case 'reopen-inv': return act(() => status(id, 'open'));
     case 'resubmit': return act(() => status(id, 'submitted'));
     case 'del': if (S.confirm !== id){ S.confirm = id; return render(); } S.confirm = null; return act(() => api('DELETE', '/api/fin/items/' + id), 'Изтрито.');

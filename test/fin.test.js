@@ -45,4 +45,26 @@ t('summary, category totals, money format and CSV escaping',()=>{
   assert.equal(Fin.money(1234567.5),'1 234 567,50');assert.equal(Fin.money(-12),'-12,00');
   assert.equal(Fin.toCsv([['а','б;в'],['г"д',null]]),'﻿а;"б;в"\r\n"г""д";');
 });
+const Core=new Function(fs.readFileSync(path.join(__dirname,'..','public','index.html'),'utf8').split('/*CORE-START*/')[1].split('/*CORE-END*/')[0]+';return Core')();
+const tx=(key,date,cp,amount,desc='')=>({key:'2026-11/'+key,date,cp,desc,amount});
+t('bank matching: closes a record only for one unambiguous pair by name or invoice number; the rest become suggestions',()=>{
+  const items=[it('i1','invoice','open',6000,{party:'Клиент АД',number:'0000000051',date:'2026-11-01'}),it('b1','bill','approved',2340,{party:'Бетон Трейд ООД',date:'2026-11-03'}),
+    it('b2','bill','submitted',900,{party:'Наем Техника ООД',date:'2026-11-03'}),it('i2','invoice','open',500,{party:'Алфа Консулт',date:'2026-11-02'}),
+    it('i3','invoice','open',700,{party:'Двойник ООД',date:'2026-11-02'}),it('i4','invoice','open',700,{party:'Двойник ООД',date:'2026-11-04'}),
+    it('e1','expense','approved',80,{party:'OMV',pay:'card',date:'2026-11-10'}),it('e2','expense','approved',45,{party:'Шел',pay:'own',date:'2026-11-10'}),it('e3','expense','submitted',33,{party:'Лукойл',pay:'card',date:'2026-11-10'}),
+    it('i5','invoice','open',1200,{party:'Гама ЕООД',number:'0000001234',date:'2026-11-05'}),it('i6','invoice','open',300,{party:'Стар Клиент',date:'2026-05-01'}),it('i7','invoice','paid',6000,{party:'Клиент АД',date:'2026-11-01'})];
+  const txs=[tx('t1','2026-11-12','KLIENT AD',6000),tx('t2','2026-11-14','BETON TREYD OOD',-2340),tx('t3','2026-11-14','NAEM TEHNIKA',-900),tx('t4','2026-11-13','DRUGO IME',500),tx('t5','2026-11-12','DVOYNIK OOD',700),
+    tx('t6','2026-11-11','OMV VARNA 123 POS',-80),tx('t7','2026-11-11','SHEL',-45),tx('t8','2026-11-11','LUKOIL',-33),tx('t9','2026-11-09','NEPOZNAT','1200'*1,'plashtane po f-ra 1234'),tx('t10','2026-11-12','STAR KLIENT',300),tx('t11','2026-11-12','KLIENT AD',-6000)];
+  const r=Fin.matchBank(items,txs,Core.nameSim),k=x=>x.id+'>'+x.key.split('/')[1];
+  assert.deepEqual(r.auto.map(k).sort(),['b1>t2','e1>t6','i1>t1','i5>t9']);assert.equal(r.auto.find(a=>a.id==='i1').date,'2026-11-12');
+  assert.deepEqual(r.suggest.map(x=>k(x)+(x.strong?'':'?')).sort(),['b2>t3','i2>t4?','i3>t5','i4>t5']);
+  const again=Fin.matchBank(items.map(i=>i.id==='i1'?{...i,bankTx:'2026-11/t1',status:'paid'}:i.id==='b1'?{...i,noAuto:true}:i.id==='i2'?{...i,skip:['2026-11/t4']}:i),txs,Core.nameSim);
+  assert.deepEqual(again.auto.map(k).sort(),['e1>t6','i5>t9']);assert.deepEqual(again.suggest.map(k).sort(),['b1>t2','b2>t3','i3>t5','i4>t5']);
+  assert.deepEqual(Fin.matchBank(items,[tx('t1','2026-11-12','KLIENT AD',6000.02)],Core.nameSim),{auto:[],suggest:[]});
+});
+t('payment reminder text for an overdue invoice',()=>{
+  const s=Fin.dunningText(it('i1','invoice','open',1234.5,{number:'0000000051',date:'2026-10-01',due:'2026-10-15'}),'Варна Строй ООД','€','2026-11-15');
+  assert(s.includes('фактура № 0000000051 от 01.10.2026 на стойност 1 234,50 € беше с падеж 15.10.2026 и към днес е просрочена с 31 дни.')&&s.endsWith('Поздрави,\nВарна Строй ООД'),s);
+  assert(Fin.dunningText(it('i1','invoice','open',5,{date:'2026-11-14',due:''}),'Х','€','2026-11-15').includes('фактура от 14.11.2026 на стойност 5,00 € беше с падеж 14.11.2026 и към днес е просрочена с 1 ден.'));
+});
 console.log('FIN: all '+n+' tests passed');
