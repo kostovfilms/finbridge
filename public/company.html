@@ -2,7 +2,13 @@
 <html lang="bg">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e6b74">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.svg">
 <title>FinBridge Финанси</title>
 <style>
 :root{--bg:#f1f4f5;--surface:#fff;--surface-2:#e8edee;--line:#d3dbdd;--ink:#16252a;--muted:#5b6d73;--accent:#0e6b74;--accent-ink:#fff;--accent-soft:#d9eef0;--good:#1d7a46;--good-soft:#dcf1e4;--warn:#9a5b00;--warn-soft:#fbecd0;--crit:#b3261e;--crit-soft:#fbe0de}
@@ -44,6 +50,17 @@ input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px
 .lines input{padding:6px 8px}
 @media print{.rail,.noprint,.note{display:none!important}.app{display:block}.main{padding:0}body{background:#fff;color:#000}.doc{border:0;max-width:none;padding:0}}
 @media (max-width:760px){.app{grid-template-columns:1fr}.rail{border-right:0;border-bottom:1px solid var(--line);padding:12px;gap:10px}.nav{flex-direction:row;overflow-x:auto}.foot{flex-direction:row;flex-wrap:wrap;gap:10px;margin:0}.main{padding:16px 12px 40px}}
+
+.snap{display:none}
+.scan{border-radius:8px;padding:10px 12px;font-size:14px;background:var(--accent-soft);display:flex;flex-direction:column;gap:4px}.scan.bad{background:var(--crit-soft);color:var(--crit)}.scan ul{margin:0;padding-left:18px}.scan .warn{color:var(--warn)}
+@media (max-width:760px){
+  body{font-size:16px}input,select,textarea{font-size:16px;min-height:44px}.btn{min-height:44px;display:inline-flex;align-items:center;justify-content:center}.btn.small{min-height:40px;padding:6px 12px}
+  .rail{position:sticky;top:0;z-index:5;padding:max(8px,env(safe-area-inset-top)) 12px 8px}.brand small{display:none}.foot{font-size:12px}
+  .nav a{min-height:42px}.main{padding:14px 12px calc(96px + env(safe-area-inset-bottom))}.form{grid-template-columns:1fr}.tiles{grid-template-columns:1fr 1fr}.cols{grid-template-columns:1fr}
+  .snap{display:flex;position:fixed;right:16px;bottom:calc(16px + env(safe-area-inset-bottom));z-index:6;align-items:center;gap:8px;background:var(--accent);color:var(--accent-ink);border-radius:28px;padding:14px 20px;font-weight:700;box-shadow:0 4px 14px rgba(0,0,0,.28);cursor:pointer}
+  .snap input{position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer;font-size:0}
+  .snap.off{display:none}
+}
 </style>
 </head>
 <body>
@@ -54,6 +71,7 @@ input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px
     <div class="foot" id="foot"></div>
   </aside>
   <main class="main" id="main" aria-live="polite"><p class="dim">Зареждане…</p></main>
+  <label class="snap off" id="snap"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Снимай документ<input type="file" accept="image/*" capture="environment" id="snap-file" aria-label="Снимай документ"></label>
 </div>
 <script>
 /*FIN-START*/
@@ -62,7 +80,7 @@ const Fin = (() => {
   const CATS = ['Гориво и транспорт', 'Материали и стоки', 'Външни услуги', 'Наем и режийни', 'Командировки', 'Реклама', 'Софтуер и абонаменти', 'Заплати и осигуровки', 'Данъци и такси', 'Други'];
   const DEFAULTS = { balance: 0, balanceDate: '', approverLimit: 0, receiptOver: 0, cats: CATS, seller: {}, invNext: 1 };
   const PAY = { own: 'Лични средства', card: 'Фирмена карта', cash: 'Каса', bank: 'Банков превод' };
-  const STATUS = { submitted: 'Чака одобрение', approved: 'Одобрен', rejected: 'Отказан', paid: 'Платен', open: 'Неплатена', void: 'Анулирана', active: 'Активен' };
+  const STATUS = { submitted: 'Чака одобрение', approved: 'Одобрен', rejected: 'Отказан', paid: 'Платен', open: 'Неплатена', void: 'Анулирана', credited: 'Кредитирана', issued: 'Издадено', active: 'Активен', paused: 'На пауза', done: 'Приключил' };
   const ROLES = { owner: 'Собственик', approver: 'Одобряващ', member: 'Служител', accountant: 'Счетоводител' };
   const r2 = n => Math.round(n * 100) / 100;
   const addDays = (d, n) => { const t = new Date(d + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
@@ -71,7 +89,8 @@ const Fin = (() => {
   const spend = i => i.type === 'expense' || i.type === 'bill';
   const counted = i => i.status === 'approved' || i.status === 'paid';
   /* Остатък за плащане по запис с частични плащания. */
-  const left = i => r2(i.amount - (i.paid || 0));
+  const left = i => r2(i.amount - (i.paid || 0) - (i.credited || 0));
+  const addMonths = (s, n, day) => { const t = (+s.slice(0, 4)) * 12 + (+s.slice(5, 7) - 1) + n; return Math.floor(t / 12) + '-' + String(t % 12 + 1).padStart(2, '0') + '-' + String(Math.min(day, 28)).padStart(2, '0'); };
 
   /* Кой може да одобри или откаже заявка. */
   function canApprove(item, actor, set){
@@ -183,12 +202,12 @@ const Fin = (() => {
     const net = r2(rows.reduce((s, l) => s + l.sum, 0)), vat = r2(net * (+rate || 0) / 100);
     return { rows, net, vat, total: r2(net + vat) };
   }
-  const issuedIn = (items, period) => items.filter(i => i.type === 'invoice' && i.inv && String(i.date).slice(0, 7) === period).sort((a, b) => String(a.number).localeCompare(String(b.number)));
+  const issuedIn = (items, period) => items.filter(i => (i.type === 'invoice' || i.type === 'credit') && i.inv && String(i.date).slice(0, 7) === period).sort((a, b) => String(a.number).localeCompare(String(b.number)));
   /* Работен дневник на продажбите от издадените фактури за месеца. Анулираните остават с нулеви стойности, за да не се къса номерацията. */
   function salesLedger(items, period, dec){
     const num = n => n.toFixed(2).replace('.', dec || ','), rows = [['№', 'Вид', 'Номер', 'Дата', 'ДДС номер или ЕИК', 'Получател', 'Предмет', 'Данъчна основа', 'Ставка', 'ДДС', 'Общо', 'Основание за неначисляване', 'Състояние']];
-    issuedIn(items, period).forEach((i, k) => { const v = i.status === 'void';
-      rows.push([k + 1, 'Фактура', i.number, fmtDate(i.date), i.inv.buyer.vatNo || i.inv.buyer.eik, i.party, i.inv.lines[0] ? i.inv.lines[0].name : '', num(v ? 0 : i.inv.net), i.inv.rate + '%', num(v ? 0 : i.inv.vat), num(v ? 0 : i.amount), i.inv.vatNote || '', v ? 'Анулирана' : '']); });
+    issuedIn(items, period).forEach((i, k) => { const v = i.status === 'void', cr = i.type === 'credit', sg = cr ? -1 : 1;
+      rows.push([k + 1, cr ? 'Кредитно известие' : 'Фактура', i.number, fmtDate(i.date), i.inv.buyer.vatNo || i.inv.buyer.eik, i.party, cr ? 'Към фактура № ' + i.ref.number + ' от ' + fmtDate(i.ref.date) + ': ' + i.ref.reason : i.inv.lines[0] ? i.inv.lines[0].name : '', num(v ? 0 : sg * i.inv.net), i.inv.rate + '%', num(v ? 0 : sg * i.inv.vat), num(v ? 0 : sg * i.amount), i.inv.vatNote || '', v ? 'Анулирана' : '']); });
     return rows;
   }
   /* Контировки за продажбите и постъпленията за месеца: 411 Клиенти, 70x приходи, 4532 ДДС на продажбите, 501 каса, 503 банка. */
@@ -196,7 +215,9 @@ const Fin = (() => {
     const num = n => n.toFixed(2).replace('.', dec || ','), rows = [['Дата', 'Вид документ', 'Номер', 'Контрагент', 'ЕИК', 'Основание', 'Дебит', 'Кредит', 'Сума']];
     for (const i of issuedIn(items, period)){
       if (i.status === 'void') continue;
-      const dt = i.pay === 'cash' ? '501' : '411', head = [fmtDate(i.date), 'Фактура', i.number, i.party, i.inv.buyer.eik], what = 'Продажба: ' + (i.inv.lines[0] ? i.inv.lines[0].name : '');
+      const cr = i.type === 'credit', dt = i.pay === 'cash' ? '501' : '411', head = [fmtDate(i.date), cr ? 'Кредитно известие' : 'Фактура', i.number, i.party, i.inv.buyer.eik], what = cr ? 'Кредитно известие към фактура ' + i.ref.number + ': ' + i.ref.reason : 'Продажба: ' + (i.inv.lines[0] ? i.inv.lines[0].name : '');
+      /* Кредитното известие е обратно записване: приходът и ДДС се дебитират, вземането (или касата) се кредитира. */
+      if (cr){ rows.push(head.concat([what, i.inv.rev, dt, num(i.inv.net)])); if (i.inv.vat) rows.push(head.concat(['ДДС по кредитно известие', '4532', dt, num(i.inv.vat)])); continue; }
       rows.push(head.concat([what, dt, i.inv.rev, num(i.inv.net)])); if (i.inv.vat) rows.push(head.concat(['ДДС по продажба', dt, '4532', num(i.inv.vat)]));
     }
     const pays = [];
@@ -210,7 +231,7 @@ const Fin = (() => {
     return rows;
   }
   function toCsv(rows){ return '﻿' + rows.map(r => r.map(c => { const s = String(c == null ? '' : c); return /[";\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(';')).join('\r\n'); }
-  return { CATS, DEFAULTS, PAY, STATUS, ROLES, r2, addDays, dayDiff, money, canApprove, budgetUsage, violations, forecast, aging, byCat, summary, toCsv, matchBank, dunningText, fmtDate, left, REV, RATES, invoiceTotals, salesLedger, salesPostings };
+  return { CATS, DEFAULTS, PAY, STATUS, ROLES, r2, addDays, dayDiff, money, canApprove, budgetUsage, violations, forecast, aging, byCat, summary, toCsv, matchBank, dunningText, fmtDate, left, addMonths, REV, RATES, invoiceTotals, salesLedger, salesPostings };
 })();
 /*FIN-END*/
 
@@ -241,7 +262,7 @@ const T = {
   bill: { title: 'Плащания към доставчици', add: 'Нова фактура за плащане', party: 'Доставчик', lead: 'Фактури от доставчици с падеж: одобрение, после плащане.' },
   invoice: { title: 'Фактури и вземания', add: 'Запиши фактура, издадена другаде', party: 'Клиент', lead: 'Издаване на фактури, следене на плащанията и кой закъснява.' }
 };
-const PILL = { submitted: 'warn', approved: 'info', rejected: 'crit', paid: 'good', open: 'warn', void: '' };
+const PILL = { submitted: 'warn', approved: 'info', rejected: 'crit', paid: 'good', open: 'warn', void: '', credited: '' };
 
 async function load(){ S.st = await api('GET', '/api/fin/state'); if (role() === 'member' && S.view === 'dash') S.view = 'expense'; }
 async function act(fn, okText){
@@ -253,6 +274,7 @@ const items = t => S.st.items.filter(i => i.type === t);
 const period = () => S.st.today.slice(0, 7);
 
 function pills(i){
+  if (i.type === 'credit') return '<span class="pill ' + (i.status === 'open' ? 'warn' : 'good') + '">' + ({ issued: 'Издадено', open: 'За връщане на клиента', paid: 'Върнато на клиента' }[i.status] || '') + '</span>';
   const v = Fin.violations(i, S.st.items, S.st.settings, S.st.today);
   let late = '';
   if ((i.type === 'invoice' && i.status === 'open') || (i.type === 'bill' && (i.status === 'submitted' || i.status === 'approved'))){ const d = Fin.dayDiff(S.st.today, i.due || i.date); if (d > 0) late = ' <span class="pill crit">просрочена с ' + d + (d === 1 ? ' ден' : ' дни') + '</span>'; }
@@ -260,11 +282,13 @@ function pills(i){
   return '<span class="pill ' + PILL[i.status] + '">' + Fin.STATUS[i.status] + '</span>' + part + late + (i.status === 'submitted' || i.status === 'approved' ? v.map(x => ' <span class="pill warn">' + esc(x) + '</span>').join('') : '');
 }
 function rowActs(i){
-  const r = role(), mine = i.owner === S.st.me.id, locked = i.status === 'paid' || i.status === 'void', b = (a, t, c) => '<button class="btn small ' + (c || '') + '" type="button" data-act="' + a + '" data-id="' + i.id + '">' + t + '</button>';
+  const r = role(), mine = i.owner === S.st.me.id, locked = i.status === 'paid' || i.status === 'void' || i.status === 'credited', b = (a, t, c) => '<button class="btn small ' + (c || '') + '" type="button" data-act="' + a + '" data-id="' + i.id + '">' + t + '</button>';
   let h = '';
-  if (i.inv) h += b('print', 'Виж фактурата');
+  if (i.inv) h += b('print', i.type === 'credit' ? 'Виж известието' : 'Виж фактурата');
   if (i.file) h += '<a class="btn small" target="_blank" rel="noopener" href="' + esc(withFirm('/api/fin/items/' + i.id + '/file')) + '">Документ</a>';
+  if (i.type === 'credit'){ if (i.status === 'open' && r !== 'member') h += b('refunded', 'Върнато на клиента', 'pri'); return '<div class="acts">' + h + '</div>'; }
   if (i.type === 'invoice'){
+    if (i.inv && (i.status === 'open' || i.status === 'paid') && Fin.r2(i.amount - (i.credited || 0)) > 0.011) h += b('credit', 'Кредитно известие');
     if (i.status === 'open') h += b('paid', i.paid > 0 ? 'Получен остатъкът' : 'Получено плащане', 'pri') + b('part', 'Частично плащане') + (Fin.dayDiff(S.st.today, i.due || i.date) > 0 ? b('dun', 'Копирай напомняне') : '') + b('void', 'Анулирай');
     else h += b('reopen-inv', 'Върни като неплатена');
   } else {
@@ -281,6 +305,7 @@ function itemForm(type, d){
   const sel = (name, opts, val, empty) => '<select name="' + name + '">' + (empty != null ? '<option value="">' + empty + '</option>' : '') + opts.map(o => '<option value="' + esc(o[0]) + '"' + (o[0] === val ? ' selected' : '') + '>' + esc(o[1]) + '</option>').join('') + '</select>';
   const cats = set.cats.includes(d.cat) || !d.cat ? set.cats : set.cats.concat(d.cat);
   return '<form class="card form" id="item-form" data-type="' + type + '" data-id="' + esc(d.id || '') + '" novalidate><h2 class="full">' + (d.id ? 'Редакция' : t.add) + '</h2>' +
+    (d.id ? '' : '<div class="full" id="scan-out"></div>') +
     '<label>' + t.party + '<input name="party" maxlength="120" value="' + esc(d.party || '') + '" required></label>' +
     (type !== 'expense' ? '<label>Номер на фактурата<input name="number" maxlength="40" value="' + esc(d.number || '') + '"></label>' : '') +
     '<label>Дата<input name="date" type="date" value="' + esc(d.date || S.st.today) + '" required></label>' +
@@ -301,7 +326,7 @@ function issueTotals(){ const d = S.issue, t = Fin.invoiceTotals(d.lines.map(l =
   return { t, html: 'Данъчна основа: <b>' + m(t.net) + '</b> · ДДС ' + d.rate + '%: <b>' + m(t.vat) + '</b> · Сума за плащане: <b>' + m(t.total) + '</b>' }; }
 function collectIssue(){
   const f = $('issue-form'), d = S.issue; if (!f || !d) return;
-  for (const k of ['party', 'eik', 'vatNo', 'address', 'mol', 'date', 'due', 'pay', 'rev', 'vatNote', 'note']) if (f.elements[k]) d[k] = f.elements[k].value;
+  for (const k of ['party', 'eik', 'vatNo', 'address', 'mol', 'date', 'due', 'pay', 'rev', 'vatNote', 'note', 'freq', 'day', 'next', 'end', 'mode', 'dueDays']) if (f.elements[k]) d[k] = f.elements[k].value;
   d.rate = f.elements.rate ? +f.elements.rate.value : 0;
   const all = n => [...f.querySelectorAll('[name="' + n + '"]')].map(e => e.value), nm = all('l_name'), q = all('l_qty'), u = all('l_unit'), p = all('l_price');
   d.lines = nm.map((x, i) => ({ name: x, qty: q[i], unit: u[i], price: p[i] }));
@@ -309,11 +334,12 @@ function collectIssue(){
 function issueForm(){
   const d = S.issue, vat = sellerVat(), tt = issueTotals(), v = k => esc(d[k] || '');
   const sel = (name, opts, val) => '<select name="' + name + '">' + opts.map(o => '<option value="' + o[0] + '"' + (String(o[0]) === String(val) ? ' selected' : '') + '>' + esc(o[1]) + '</option>').join('') + '</select>';
-  return '<form class="card form" id="issue-form" novalidate><h2 class="full">Нова фактура</h2>' +
+  return '<form class="card form" id="issue-form" novalidate><h2 class="full">' + (d.recur ? (d.rid ? 'Редакция на повтаряща се фактура' : 'Нова повтаряща се фактура') : 'Нова фактура') + '</h2>' +
     '<label>Получател<input name="party" list="customers" maxlength="120" value="' + v('party') + '" required autocomplete="off"></label><datalist id="customers">' + [...customers().keys()].map(c => '<option value="' + esc(c) + '">').join('') + '</datalist>' +
     '<label>ЕИК<input name="eik" inputmode="numeric" maxlength="15" value="' + v('eik') + '"></label><label>ДДС номер<input name="vatNo" maxlength="20" value="' + v('vatNo') + '"></label><label>МОЛ<input name="mol" maxlength="80" value="' + v('mol') + '"></label>' +
     '<label class="full">Адрес<input name="address" maxlength="200" value="' + v('address') + '"></label>' +
-    '<label>Дата<input name="date" type="date" value="' + v('date') + '" required></label><label>Падеж<input name="due" type="date" value="' + v('due') + '"></label>' +
+    (d.recur ? '<label>Повтаряне<select name="freq">' + [['month', 'Всеки месец'], ['quarter', 'Всяко тримесечие'], ['year', 'Всяка година']].map(o => '<option value="' + o[0] + '"' + (d.freq === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select></label><label>Първо издаване<input name="next" type="date" value="' + v('next') + '" min="' + S.st.today + '" required></label><label>Ден от месеца (1 до 28)<input name="day" inputmode="numeric" maxlength="2" value="' + v('day') + '"></label><label>Срок за плащане, дни<input name="dueDays" inputmode="numeric" maxlength="2" value="' + v('dueDays') + '"></label><label>Краен срок (по избор)<input name="end" type="date" value="' + v('end') + '"></label><label>Как се издава<select name="mode"><option value="confirm"' + (d.mode === 'auto' ? '' : ' selected') + '>Напомня ми, издавам с един клик</option><option value="auto"' + (d.mode === 'auto' ? ' selected' : '') + '>Издава се автоматично</option></select></label>'
+      : '<label>Дата<input name="date" type="date" value="' + v('date') + '" required></label><label>Падеж<input name="due" type="date" value="' + v('due') + '"></label>') +
     '<label>Плащане' + sel('pay', [['bank', 'По банков път'], ['cash', 'В брой']], d.pay) + '</label><label>Вид приход' + sel('rev', Object.entries(Fin.REV).map(([k, n]) => [k, n + ' (' + k + ')']), d.rev) + '</label>' +
     (vat ? '<label>ДДС ставка' + sel('rate', Fin.RATES.map(r => [r, r + '%']), d.rate) + '</label><label>Основание при 0%<input name="vatNote" maxlength="120" placeholder="напр. чл. 21, ал. 2 от ЗДДС" value="' + v('vatNote') + '"></label>'
       : '<div class="full dim">Фирмата не е регистрирана по ДДС. Фактурата се издава без ДДС на основание чл. 113, ал. 9 от ЗДДС.</div>') +
@@ -321,30 +347,71 @@ function issueForm(){
     d.lines.map((l, k) => '<tr><td><input name="l_name" maxlength="200" value="' + esc(l.name) + '" aria-label="Наименование, ред ' + (k + 1) + '"></td><td><input name="l_qty" inputmode="decimal" style="width:90px" value="' + esc(l.qty) + '" aria-label="Количество"></td><td><input name="l_unit" maxlength="10" style="width:80px" value="' + esc(l.unit) + '" aria-label="Мярка"></td><td><input name="l_price" inputmode="decimal" style="width:120px" value="' + esc(l.price) + '" aria-label="Единична цена"></td><td class="num" data-line-sum>' + Fin.money(tt.t.rows[k].sum) + '</td><td>' + (d.lines.length > 1 ? '<button class="btn small bad" type="button" data-act="line-del" data-k="' + k + '" aria-label="Махни ред ' + (k + 1) + '">Махни</button>' : '') + '</td></tr>').join('') +
     '</tbody></table></div><div class="full acts"><button class="btn small" type="button" data-act="line-add">Добави ред</button></div>' +
     '<div class="full" id="issue-totals">' + tt.html + '</div><label class="full">Бележка във фактурата<input name="note" maxlength="300" value="' + v('note') + '"></label>' +
-    '<div class="full acts"><button class="btn pri" type="submit">Издай фактурата</button><button class="btn" type="button" data-act="cancel">Отказ</button></div>' +
-    '<p class="full dim">Номерът се дава автоматично при издаване. Издадена фактура не се редактира и не се изтрива: при грешка се анулира и се издава нова.</p></form>';
+    '<div class="full acts"><button class="btn pri" type="submit">' + (d.recur ? 'Запази шаблона' : 'Издай фактурата') + '</button><button class="btn" type="button" data-act="cancel">Отказ</button></div>' +
+    (d.recur ? '<p class="full dim">Фактурата се издава с датата на издаването. Номерът се дава тогава, а в бележката се добавя периодът. При „автоматично“ сървърът издава сам в деня; при „напомня ми“ виждате известие в таблото и издавате с един клик. Нищо не се изпраща на клиента.</p></form>' : '') + (d.recur ? '' :
+    '<p class="full dim">Номерът се дава автоматично при издаване. Издадена фактура не се редактира и не се изтрива: при грешка се анулира и се издава нова.</p></form>');
+}
+function blankCredit(inv){ return { id: inv.id, date: S.st.today, reason: '', note: '', lines: inv.inv.lines.map(l => ({ name: l.name, qty: String(l.qty).replace('.', ','), unit: l.unit, price: String(l.price).replace('.', ',') })) }; }
+function creditTotals(){
+  const d = S.credit, inv = S.st.items.find(i => i.id === d.id), t = Fin.invoiceTotals(d.lines.map(l => ({ qty: pn(l.qty), price: pn(l.price) })), inv.inv.rate), cap = Fin.r2(inv.amount - (inv.credited || 0));
+  return { t, cap, html: 'Данъчна основа: <b>' + m(t.net) + '</b> · ДДС ' + inv.inv.rate + '%: <b>' + m(t.vat) + '</b> · Кредитно известие: <b>' + m(t.total) + '</b>' + (t.total > cap + 0.011 ? '<div class="note crit">Над останалото по фактурата (' + m(cap) + ').</div>' : '') };
+}
+function collectCredit(){
+  const f = $('credit-form'), d = S.credit; if (!f || !d) return;
+  for (const k of ['date', 'reason', 'note']) d[k] = f.elements[k].value;
+  const all = n => [...f.querySelectorAll('[name="' + n + '"]')].map(e => e.value), nm = all('l_name'), q = all('l_qty'), u = all('l_unit'), p = all('l_price');
+  d.lines = nm.map((x, i) => ({ name: x, qty: q[i], unit: u[i], price: p[i] }));
+}
+function creditForm(){
+  const d = S.credit, inv = S.st.items.find(i => i.id === d.id); if (!inv) return '';
+  const tt = creditTotals();
+  return '<form class="card form" id="credit-form" novalidate><h2 class="full">Кредитно известие към фактура № ' + esc(inv.number) + ' от ' + dm(inv.date) + ' (' + esc(inv.party) + ')</h2>' +
+    '<label>Дата<input name="date" type="date" value="' + esc(d.date) + '" min="' + esc(inv.date) + '" required></label>' +
+    '<label>Основание<input name="reason" list="credit-reasons" maxlength="200" value="' + esc(d.reason) + '" required autocomplete="off"></label><datalist id="credit-reasons"><option value="Върната стока"><option value="Отстъпка от цената"><option value="Грешка в количество или цена"><option value="Отказана поръчка"></datalist>' +
+    '<div class="full dim">Оставете само редовете и количествата, които се кредитират. Ставката на ДДС е същата като във фактурата (' + inv.inv.rate + '%).</div>' +
+    '<div class="full scroll"><table class="lines"><thead><tr><th>Наименование</th><th>Количество</th><th>Мярка</th><th>Ед. цена без ДДС</th></tr></thead><tbody>' +
+    d.lines.map((l, k) => '<tr><td><input name="l_name" maxlength="200" value="' + esc(l.name) + '" aria-label="Наименование, ред ' + (k + 1) + '"></td><td><input name="l_qty" inputmode="decimal" style="width:90px" value="' + esc(l.qty) + '" aria-label="Количество"></td><td><input name="l_unit" maxlength="10" style="width:80px" value="' + esc(l.unit) + '" aria-label="Мярка"></td><td><input name="l_price" inputmode="decimal" style="width:120px" value="' + esc(l.price) + '" aria-label="Единична цена"></td></tr>').join('') +
+    '</tbody></table></div><div class="full" id="credit-totals">' + tt.html + '</div><label class="full">Бележка<input name="note" maxlength="300" value="' + esc(d.note) + '"></label>' +
+    '<div class="full acts"><button class="btn pri" type="submit">Издай кредитното известие</button><button class="btn" type="button" data-act="cancel">Отказ</button></div>' +
+    '<p class="full dim">Известието получава следващия номер от същата поредица като фактурите. Фактурата остава непроменена, но дължимото по нея намалява.' + (inv.status === 'paid' || inv.paid > 0 ? ' Ако клиентът вече е платил, ще Ви покажем колко да му върнете.' : '') + '</p></form>';
+}
+function blankRecur(){ const t = S.st.today; return Object.assign(blankIssue(), { recur: true, rid: '', freq: 'month', day: String(Math.min(28, +t.slice(8, 10))), next: Fin.addMonths(t, 1, Math.min(28, +t.slice(8, 10))), end: '', mode: 'confirm', dueDays: '14' }); }
+const FREQ = { month: 'всеки месец', quarter: 'всяко тримесечие', year: 'всяка година' };
+function vRecur(){
+  const list = items('recur'); if (!list.length) return '';
+  const b = (a, t, id, cl) => '<button class="btn small ' + (cl || '') + '" type="button" data-act="' + a + '" data-id="' + id + '">' + t + '</button>';
+  return '<div class="card scroll"><h2>Повтарящи се фактури</h2><table><thead><tr><th>Клиент</th><th>График</th><th>Следваща</th><th class="num">Сума</th><th>Състояние</th><th></th></tr></thead><tbody>' +
+    list.map(i => { const due = i.status === 'active' && i.next <= S.st.today;
+      return '<tr><td>' + esc(i.party) + '<div class="dim">' + (i.mode === 'auto' ? 'издава се автоматично' : 'с потвърждение') + (i.count ? ' · издадени ' + i.count + (i.lastNumber ? ', последна № ' + esc(i.lastNumber) : '') : '') + '</div>' + (i.error ? '<div class="note crit">' + esc(i.error) + '</div>' : '') + '</td><td>' + FREQ[i.freq] + ', ' + i.day + '-о число</td><td>' + (i.status === 'done' ? '' : dm(i.next)) + (i.end ? '<div class="dim">до ' + dm(i.end) + '</div>' : '') + '</td><td class="num">' + m(i.amount) + '</td>' +
+        '<td><span class="pill ' + (due ? 'crit' : i.status === 'active' ? 'good' : '') + '">' + (due ? 'Чака издаване' : Fin.STATUS[i.status]) + '</span></td><td><div class="acts">' +
+        (due ? b('recur-issue', 'Издай сега', i.id, 'pri') + b('recur-skip', 'Пропусни', i.id) : '') + (i.status === 'active' ? b('recur-pause', 'Пауза', i.id) : i.status === 'paused' ? b('recur-resume', 'Поднови', i.id) : '') + (i.status !== 'done' ? b('recur-edit', 'Редактирай', i.id) : '') + b('recur-del', S.confirm === i.id ? 'Потвърди изтриването' : 'Изтрий', i.id, 'bad') + '</div></td></tr>'; }).join('') + '</tbody></table></div>';
+}
+function vCredits(){
+  const list = items('credit'); if (!list.length) return '';
+  return '<div class="card scroll"><h2>Кредитни известия</h2><table><thead><tr><th>Дата</th><th>Получател</th><th>Към фактура</th><th class="num">Сума</th><th>Състояние</th><th></th></tr></thead><tbody>' +
+    list.map(i => '<tr><td>' + dm(i.date) + '</td><td>' + esc(i.party) + ' <span class="dim">№ ' + esc(i.number) + '</span><div class="dim">' + esc(i.ref.reason) + '</div></td><td>№ ' + esc(i.ref.number) + '</td><td class="num">-' + m(i.amount) + (i.refund > 0 ? '<div class="dim">за връщане ' + Fin.money(i.refund) + '</div>' : '') + '</td><td>' + pills(i) + '</td><td>' + rowActs(i) + '</td></tr>').join('') + '</tbody></table></div>';
 }
 function invoiceDoc(i){
-  const v = i.inv, row = (k, x) => x ? k + ': ' + esc(x) + '<br>' : '', who = (name, p) => '<b>' + esc(name) + '</b><br>' + row('ЕИК', p.eik) + row('ДДС №', p.vatNo) + row('Адрес', p.address) + row('МОЛ', p.mol);
+  const v = i.inv, cr = i.type === 'credit', ng = x => cr ? '-' + x : x, row = (k, x) => x ? k + ': ' + esc(x) + '<br>' : '', who = (name, p) => '<b>' + esc(name) + '</b><br>' + row('ЕИК', p.eik) + row('ДДС №', p.vatNo) + row('Адрес', p.address) + row('МОЛ', p.mol);
   return '<div class="acts noprint"><button class="btn pri" type="button" data-act="do-print">Печат или запис като PDF</button><button class="btn" type="button" data-act="print-close">Назад към фактурите</button></div>' +
-    '<article class="card doc" id="invoice-doc"><div class="head"><div><h1>ФАКТУРА</h1><div>№ <b>' + esc(i.number) + '</b> от ' + dm(i.date) + '</div></div><div><b>' + (i.status === 'void' ? 'АНУЛИРАНА' : 'ОРИГИНАЛ') + '</b></div></div>' +
+    (cr && i.refund > 0 ? '<div class="note warn noprint">Клиентът е платил повече от новата дължима сума. Върнете му ' + m(i.refund) + ' и отбележете връщането в списъка с кредитни известия.</div>' : '') + '<article class="card doc" id="invoice-doc"><div class="head"><div><h1>' + (cr ? 'КРЕДИТНО ИЗВЕСТИЕ' : 'ФАКТУРА') + '</h1><div>№ <b>' + esc(i.number) + '</b> от ' + dm(i.date) + '</div></div><div><b>' + (i.status === 'void' ? 'АНУЛИРАНА' : 'ОРИГИНАЛ') + '</b></div></div>' +
     '<div class="two"><section><h2>Получател</h2>' + who(i.party, v.buyer) + '</section><section><h2>Доставчик</h2>' + who(v.seller.name, v.seller) + '</section></div>' +
     '<table><thead><tr><th>№</th><th>Наименование</th><th>Мярка</th><th class="num">Количество</th><th class="num">Ед. цена</th><th class="num">Стойност</th></tr></thead><tbody>' +
-    v.lines.map((l, k) => '<tr><td>' + (k + 1) + '</td><td>' + esc(l.name) + '</td><td>' + esc(l.unit) + '</td><td class="num">' + String(l.qty).replace('.', ',') + '</td><td class="num">' + Fin.money(l.price) + '</td><td class="num">' + Fin.money(l.sum) + '</td></tr>').join('') + '</tbody></table>' +
-    '<table class="sum"><tbody><tr><td>Данъчна основа</td><td class="num">' + m(v.net) + '</td></tr><tr><td>ДДС ' + v.rate + '%</td><td class="num">' + m(v.vat) + '</td></tr><tr><td>Сума за плащане</td><td class="num">' + m(i.amount) + '</td></tr></tbody></table>' +
-    '<p>' + (v.vatNote ? 'Основание за неначисляване на ДДС: ' + esc(v.vatNote) + '<br>' : '') + 'Дата на данъчното събитие: ' + dm(i.date) + '<br>Начин на плащане: ' + (i.pay === 'cash' ? 'в брой' : 'по банков път') + (i.due && i.pay !== 'cash' ? '<br>Срок за плащане: ' + dm(i.due) : '') +
-    (i.pay !== 'cash' && v.seller.iban ? '<br>IBAN: ' + esc(v.seller.iban) + (v.seller.bank ? ', ' + esc(v.seller.bank) : '') + (v.seller.bic ? ', BIC ' + esc(v.seller.bic) : '') : '') + (i.note ? '<br>' + esc(i.note) : '') + '</p>' +
+    v.lines.map((l, k) => '<tr><td>' + (k + 1) + '</td><td>' + esc(l.name) + '</td><td>' + esc(l.unit) + '</td><td class="num">' + ng(String(l.qty).replace('.', ',')) + '</td><td class="num">' + Fin.money(l.price) + '</td><td class="num">' + ng(Fin.money(l.sum)) + '</td></tr>').join('') + '</tbody></table>' +
+    '<table class="sum"><tbody><tr><td>Данъчна основа</td><td class="num">' + ng(m(v.net)) + '</td></tr><tr><td>ДДС ' + v.rate + '%</td><td class="num">' + ng(m(v.vat)) + '</td></tr><tr><td>' + (cr ? 'Общо кредитирано' : 'Сума за плащане') + '</td><td class="num">' + ng(m(i.amount)) + '</td></tr></tbody></table>' +
+    '<p>' + (cr ? 'Към фактура № <b>' + esc(i.ref.number) + '</b> от ' + dm(i.ref.date) + '<br>Основание: ' + esc(i.ref.reason) + '<br>' : '') + (v.vatNote ? 'Основание за неначисляване на ДДС: ' + esc(v.vatNote) + '<br>' : '') + 'Дата на данъчното събитие: ' + dm(i.date) + (cr ? '' : '<br>Начин на плащане: ' + (i.pay === 'cash' ? 'в брой' : 'по банков път')) + (!cr && i.due && i.pay !== 'cash' ? '<br>Срок за плащане: ' + dm(i.due) : '') +
+    (!cr && i.pay !== 'cash' && v.seller.iban ? '<br>IBAN: ' + esc(v.seller.iban) + (v.seller.bank ? ', ' + esc(v.seller.bank) : '') + (v.seller.bic ? ', BIC ' + esc(v.seller.bic) : '') : '') + (i.note ? '<br>' + esc(i.note) : '') + '</p>' +
     '<p class="dim">Съставил: ' + esc(i.by || '') + '</p></article>';
 }
 function vList(type){
   const t = T[type], f = S.filter, all = items(type);
   const list = all.filter(i => (!f.status || i.status === f.status) && (!f.q || (i.party + ' ' + (i.number || '') + ' ' + (i.note || '') + ' ' + (i.by || '')).toLowerCase().includes(f.q.toLowerCase())));
-  const sts = type === 'invoice' ? ['open', 'paid', 'void'] : ['submitted', 'approved', 'rejected', 'paid'];
+  const sts = type === 'invoice' ? ['open', 'paid', 'credited', 'void'] : ['submitted', 'approved', 'rejected', 'paid'];
   const total = Fin.r2(list.reduce((s, i) => s + i.amount, 0));
-  let h = '<div class="head"><div><h1>' + t.title + '</h1><div class="dim">' + t.lead + '</div></div><div class="acts"><button class="btn" type="button" data-act="csv" data-type="' + type + '"' + (all.length ? '' : ' disabled') + '>Изтегли CSV</button><button class="btn' + (type === 'invoice' ? '' : ' pri') + '" type="button" data-act="new" data-type="' + type + '">' + t.add + '</button>' + (type === 'invoice' ? '<button class="btn pri" type="button" data-act="issue">Издай фактура</button>' : '') + '</div></div>';
+  let h = '<div class="head"><div><h1>' + t.title + '</h1><div class="dim">' + t.lead + '</div></div><div class="acts"><button class="btn" type="button" data-act="csv" data-type="' + type + '"' + (all.length ? '' : ' disabled') + '>Изтегли CSV</button><button class="btn' + (type === 'invoice' ? '' : ' pri') + '" type="button" data-act="new" data-type="' + type + '">' + t.add + '</button>' + (type === 'invoice' ? '<button class="btn" type="button" data-act="recur-new">Повтаряща се фактура</button><button class="btn pri" type="button" data-act="issue">Издай фактура</button>' : '') + '</div></div>';
   if (type === 'invoice'){ const ep = S.expPeriod || period(), u = k => esc(withFirm('/api/fin/export?kind=' + k + '&period=' + ep));
     h += '<div class="filters"><label class="dim">Месец <input type="month" id="exp-period" value="' + ep + '"></label><a class="btn small" id="sales-ledger" href="' + u('ledger') + '">Дневник на продажбите</a><a class="btn small" id="sales-post" href="' + u('postings') + '">Контировки за продажбите</a></div>';
-    if (S.issue) h += issueForm(); }
+    if (S.issue) h += issueForm(); if (S.credit) h += creditForm(); }
   if (S.form && S.form.type === type) h += itemForm(type, S.form.data);
   if (S.reject) h += '<form class="card form" id="reject-form" data-id="' + S.reject + '"><label class="full">Причина за отказа<input name="note" maxlength="300" required></label><div class="full acts"><button class="btn pri" type="submit">Откажи заявката</button><button class="btn" type="button" data-act="cancel">Назад</button></div></form>';
   if (S.pay){ const i = S.st.items.find(i => i.id === S.pay); if (i) h += '<form class="card form" id="pay-form" data-id="' + i.id + '" novalidate><h2 class="full">Частично плащане: ' + esc(i.party) + (i.number ? ' № ' + esc(i.number) : '') + '</h2><label>Платена сума (' + S.st.cur + '), остатък ' + Fin.money(Fin.left(i)) + '<input name="amount" inputmode="decimal" required></label><label>Дата на плащането<input name="date" type="date" value="' + S.st.today + '" required></label><div class="full acts"><button class="btn pri" type="submit">Запиши плащането</button><button class="btn" type="button" data-act="cancel">Назад</button></div></form>'; }
@@ -352,8 +419,9 @@ function vList(type){
   h += '<div class="card scroll">' + (list.length ? '<table><thead><tr><th>Дата</th><th>' + t.party + '</th>' + (type !== 'invoice' ? '<th>Категория</th>' : '') + (type !== 'expense' ? '<th>Падеж</th>' : '<th>Подал</th>') + '<th class="num">Сума</th><th>Състояние</th><th></th></tr></thead><tbody>' +
     list.map(i => { const last = i.log.length ? i.log[i.log.length - 1] : null;
       return '<tr><td>' + dm(i.date) + '</td><td>' + esc(i.party) + (i.number ? ' <span class="dim">№ ' + esc(i.number) + '</span>' : '') + (i.note ? '<div class="dim">' + esc(i.note) + '</div>' : '') + '</td>' + (type !== 'invoice' ? '<td>' + esc(i.cat || '') + (type === 'expense' ? '<div class="dim">' + esc(Fin.PAY[i.pay] || '') + '</div>' : '') + '</td>' : '') +
-        '<td>' + (type !== 'expense' ? dm(i.due) : esc(i.by || '')) + '</td><td class="num">' + m(i.amount) + (i.paid > 0 && i.status !== 'paid' ? '<div class="dim">платени ' + Fin.money(i.paid) + ' · остават ' + Fin.money(Fin.left(i)) + '</div>' : '') + '</td><td>' + pills(i) + (i.status === 'rejected' && last && last.note ? '<div class="dim">Причина: ' + esc(last.note) + '</div>' : '') + (i.status === 'paid' && i.paidAt ? '<div class="dim">на ' + dm(i.paidAt) + (i.bankTx ? ' · по банковото извлечение' : '') + '</div>' : '') + '</td><td>' + rowActs(i) + '</td></tr>'; }).join('') +
+        '<td>' + (type !== 'expense' ? dm(i.due) : esc(i.by || '')) + '</td><td class="num">' + m(i.amount) + (i.credited > 0 ? '<div class="dim">кредитирано ' + Fin.money(i.credited) + '</div>' : '') + (i.paid > 0 && i.status !== 'paid' ? '<div class="dim">платени ' + Fin.money(i.paid) + ' · остават ' + Fin.money(Fin.left(i)) + '</div>' : '') + '</td><td>' + pills(i) + (i.status === 'rejected' && last && last.note ? '<div class="dim">Причина: ' + esc(last.note) + '</div>' : '') + (i.status === 'paid' && i.paidAt ? '<div class="dim">на ' + dm(i.paidAt) + (i.bankTx ? ' · по банковото извлечение' : '') + '</div>' : '') + '</td><td>' + rowActs(i) + '</td></tr>'; }).join('') +
     '</tbody><tfoot><tr><td colspan="' + (type === 'invoice' ? 3 : 4) + '" class="dim">' + list.length + (list.length === 1 ? ' запис' : ' записа') + '</td><td class="num"><b>' + m(total) + '</b></td><td colspan="2"></td></tr></tfoot></table>' : '<div class="empty">' + (all.length ? 'Няма записи по този филтър.' : 'Още няма записи.') + '</div>') + '</div>';
+  if (type === 'invoice') h += vRecur() + vCredits();
   return h;
 }
 function budgetBars(){
@@ -367,6 +435,8 @@ function vDash(){
   h += '<div class="tiles"><div class="card tile"><span>Наличност</span><b>' + m(st.settings.balance) + '</b><small>' + (st.settings.balanceDate ? 'към ' + dm(st.settings.balanceDate) : 'не е въведена') + '</small></div>' +
     '<div class="card tile"><span>Чакат одобрение</span><b>' + s.waitN + '</b><small>' + m(s.waitSum) + '</small></div><div class="card tile"><span>За плащане</span><b>' + m(s.paySum) + '</b><small>' + s.payN + ' одобрени</small></div>' +
     '<div class="card tile"><span>Вземания</span><b>' + m(s.recvSum) + '</b><small>' + (ag.overdue.length ? 'просрочени ' + m(Fin.r2(ag.d30 + ag.d60 + ag.older)) : 'няма просрочени') + '</small></div></div>';
+  const rdue = items('recur').filter(i => i.status === 'active' && i.next <= st.today);
+  if (rdue.length) h += '<div class="note warn">Чакат издаване ' + rdue.length + (rdue.length === 1 ? ' повтаряща се фактура' : ' повтарящи се фактури') + ': ' + rdue.map(i => esc(i.party)).join(', ') + '. <a href="#invoice" data-view="invoice">Към вземанията</a></div>';
   if (low) h += '<div class="note crit">По текущите падежи наличността става отрицателна в седмицата от ' + dm(low.start) + ' (' + m(low.balance) + ').</div>';
   if (st.missing) h += '<div class="note warn">Счетоводителят чака документи за ' + st.missing + (st.missing === 1 ? ' банково плащане' : ' банкови плащания') + '. <a href="' + esc(st.portal) + '" target="_blank" rel="noopener">Качете ги тук</a>.</div>';
   if (st.suggest && st.suggest.length) h += '<section class="card scroll" id="bank-suggest"><h2>Плащания в банката, които приличат на ваши записи</h2><table><thead><tr><th>В извлечението</th><th>Ваш запис</th><th></th></tr></thead><tbody>' + st.suggest.map(x => { const i = st.items.find(i => i.id === x.id); if (!i) return '';
@@ -405,34 +475,85 @@ function vTeam(){
 }
 function render(){
   const st = S.st, r = role(), wait = t => st.items.filter(i => i.type === t && i.status === 'submitted').length;
-  $('firm').textContent = st.firm.name;
+  $('firm').textContent = st.firm.name; if (!S.form){ S.scanFile = null; S.scanSeq++; } $('snap').classList.toggle('off', !!(S.form || S.issue || S.credit || S.print || S.pay || S.reject));
   $('nav').innerHTML = VIEWS.filter(v => v[2](r)).map(v => '<a href="#' + v[0] + '" data-view="' + v[0] + '"' + (S.view === v[0] ? ' class="on" aria-current="page"' : '') + '>' + v[1] + (wait(v[0]) && r !== 'member' ? '<span class="count">' + wait(v[0]) + '</span>' : '') + '</a>').join('');
   $('foot').innerHTML = '<span>' + esc(st.me.email) + ' · ' + Fin.ROLES[st.me.office ? 'accountant' : r] + '</span>' + (st.me.office ? '<a href="/">Към счетоводната част</a>' : '<a href="#" data-act="logout">Изход</a>');
   const pi = S.print && st.items.find(i => i.id === S.print && i.inv);
   const body = pi ? invoiceDoc(pi) : S.view === 'dash' ? vDash() : S.view === 'budget' ? vBudget() : S.view === 'team' ? vTeam() : vList(S.view);
   $('main').innerHTML = (st.me.office ? '<div class="note info">Преглеждате финансите на фирмата като счетоводител.</div>' : '') + (S.msg ? '<div class="note ' + S.msg.cls + '" role="status">' + esc(S.msg.text) + '</div>' : '') + body;
 }
-async function go(v){ S.view = v; if (location.hash.slice(1) !== v) history.replaceState(null, '', '#' + v); S.form = null; S.reject = null; S.pay = null; S.issue = null; S.print = null; S.confirm = null; S.msg = null; S.filter = { status: '', q: '' };
+async function go(v){ S.view = v; if (location.hash.slice(1) !== v) history.replaceState(null, '', '#' + v); S.form = null; S.reject = null; S.pay = null; S.issue = null; S.credit = null; S.print = null; S.confirm = null; S.msg = null; S.filter = { status: '', q: '' };
   /* Разделът с формите за екипа се рисува веднъж, след зареждането, за да не се губи въведеното. */
   if (v !== 'team') render();
   try { await load(); if (v === 'team') S.users = await api('GET', '/api/fin/users'); } catch (e) { S.msg = { cls: 'crit', text: e.message }; }
-  if (S.view === v && (v === 'team' || (!S.form && !S.reject && !S.pay && !S.issue))) render(); }
+  if (S.view === v && (v === 'team' || (!S.form && !S.reject && !S.pay && !S.issue && !S.credit))) render(); }
 const status = (id, status, note) => api('POST', '/api/fin/items/' + id + '/status', { status, note });
+/* Разчитане на документ: снимката се смалява, изпраща се за разчитане и полетата се попълват. Потребителят винаги проверява и потвърждава. */
+S.scanSeq = 0; S.scanFile = null;
+async function shrink(file){
+  if (!/^image\/(jpeg|png|webp)$/.test(file.type)) return file;
+  try {
+    const bmp = await createImageBitmap(file), k = Math.min(1, 2000 / Math.max(bmp.width, bmp.height)), c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(bmp.width * k)); c.height = Math.max(1, Math.round(bmp.height * k));
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height); if (bmp.close) bmp.close();
+    const blob = await new Promise(ok => c.toBlob(ok, 'image/jpeg', 0.85));
+    if (blob && (blob.size < file.size || file.size > 4.5e6)) return new File([blob], (file.name || 'snimka').replace(/\.[A-Za-z0-9]+$/, '') + '.jpg', { type: 'image/jpeg' });
+  } catch (e) {}
+  return file;
+}
+async function scanDoc(file){
+  const out = () => $('scan-out'), mine = ++S.scanSeq; if (!out()) return;
+  S.scanFile = file;
+  out().innerHTML = '<div class="scan" role="status">' + (S.st.scan ? 'Разчитам документа…' : 'Документът е добавен. Автоматичното разчитане не е включено, попълнете полетата ръчно.') + '</div>';
+  const f = await shrink(file); if (mine !== S.scanSeq) return;
+  /* Към счетоводителя отива оригиналът; смалената снимка се ползва само за разчитането (или ако оригиналът е над лимита за качване). */
+  S.scanFile = file.size > 14e6 ? f : file;
+  if (!S.st.scan) return;
+  let r;
+  try { r = await api('POST', '/api/fin/scan?name=' + encodeURIComponent(f.name), f, true); }
+  catch (e) { if (mine === S.scanSeq && out()) out().innerHTML = '<div class="scan bad" role="alert">' + esc(e.message) + ' Попълнете полетата ръчно.</div>'; return; }
+  const F = $('item-form'); if (mine !== S.scanSeq || !F || !out()) return;
+  const set = (n, v) => { const e = F.elements[n]; if (e && v) e.value = v; }, d = r.data, type = F.dataset.type, warns = r.warnings.slice();
+  set('party', d.party); set('number', d.number); set('date', d.date); set('due', d.due); set('amount', d.amount ? d.amount.toFixed(2).replace('.', ',') : ''); set('cat', d.cat); set('note', d.note);
+  if (r.kind && type !== 'budget' && r.kind !== type && type !== 'invoice') warns.push(r.kind === 'bill' ? 'Прилича на фактура от доставчик. По-подходящо е да я добавите от раздела „Плащания“, за да се следи падежът.' : 'Прилича на касова бележка или разход на служител.');
+  out().innerHTML = '<div class="scan" role="status"><b>Разчетено автоматично' + (r.confidence ? ' (увереност ' + Math.round(r.confidence * 100) + '%)' : '') + '. Проверете данните и натиснете „Добави“.</b>' + (warns.length ? '<ul>' + warns.map(w => '<li class="warn">' + esc(w) + '</li>').join('') + '</ul>' : '') + '</div>';
+}
+document.addEventListener('change', e => {
+  const t = e.target;
+  if (t.matches && t.matches('#item-form input[name=file]') && !$('item-form').dataset.id){ if (t.files[0]) return scanDoc(t.files[0]); S.scanSeq++; S.scanFile = null; if ($('scan-out')) $('scan-out').innerHTML = ''; return; }
+  if (t.id === 'snap-file'){
+    const file = t.files[0]; t.value = ''; if (!file) return;
+    S.form = { type: 'expense', data: null }; S.reject = S.pay = S.issue = S.print = S.credit = null; S.view = 'expense'; S.msg = null; render();
+    const inp = $('item-form') && $('item-form').elements.file; try { const dt = new DataTransfer(); dt.items.add(file); inp.files = dt.files; } catch (x) {}
+    window.scrollTo(0, 0); scanDoc(file);
+  }
+});
+
 document.addEventListener('click', e => {
   const nav = e.target.closest('[data-view]'); if (nav){ e.preventDefault(); return go(nav.dataset.view); }
   const el = e.target.closest('[data-act]'); if (!el) return;
   const a = el.dataset.act, id = el.dataset.id, it = id && S.st.items.find(i => i.id === id);
-  if (a !== 'del' && a !== 'del-user') S.confirm = null;
+  if (a !== 'del' && a !== 'del-user' && a !== 'recur-del') S.confirm = null;
   switch (a){
     case 'logout': e.preventDefault(); return api('POST', '/api/logout').then(() => { location.href = '/login'; });
-    case 'new': S.form = { type: el.dataset.type, data: null }; S.reject = null; S.pay = null; S.issue = null; if (S.view !== 'dash' || el.dataset.type !== 'expense') S.view = el.dataset.type; S.msg = null; return render();
+    case 'new': S.form = { type: el.dataset.type, data: null }; S.reject = null; S.pay = null; S.issue = null; S.credit = null; if (S.view !== 'dash' || el.dataset.type !== 'expense') S.view = el.dataset.type; S.msg = null; return render();
     case 'edit': S.form = { type: it.type, data: it }; S.reject = null; S.pay = null; return render();
     case 'part': S.pay = id; S.form = null; S.reject = null; S.msg = null; return render();
     case 'bank-part': return act(() => api('POST', '/api/fin/items/' + id + '/pay', { bank: el.dataset.bank }), 'Вноската е отнесена към записа.');
-    case 'cancel': S.form = null; S.reject = null; S.pay = null; S.issue = null; return render();
-    case 'issue': S.issue = blankIssue(); S.form = null; S.reject = null; S.pay = null; S.msg = null; return render();
+    case 'cancel': S.form = null; S.reject = null; S.pay = null; S.issue = null; S.credit = null; return render();
+    case 'issue': S.credit = null; S.issue = blankIssue(); S.form = null; S.reject = null; S.pay = null; S.msg = null; return render();
     case 'line-add': collectIssue(); if (S.issue.lines.length < 50) S.issue.lines.push({ name: '', qty: '1', unit: 'бр.', price: '' }); return render();
     case 'line-del': collectIssue(); S.issue.lines.splice(+el.dataset.k, 1); return render();
+    case 'recur-new': S.credit = null; S.issue = blankRecur(); S.form = S.reject = S.pay = S.print = null; S.view = 'invoice'; S.msg = null; return render();
+    case 'recur-edit': S.credit = null; S.issue = Object.assign(blankIssue(), { recur: true, rid: id, party: it.party, eik: it.eik, vatNo: it.vatNo, address: it.address, mol: it.mol, rate: it.rate, vatNote: it.vatNote, pay: it.pay, rev: it.rev, note: it.note, freq: it.freq, day: String(it.day), next: it.next < S.st.today ? S.st.today : it.next, end: it.end || '', mode: it.mode, dueDays: String(it.dueDays),
+      lines: it.lines.map(l => ({ name: l.name, qty: String(l.qty).replace('.', ','), unit: l.unit, price: String(l.price).replace('.', ',') })) }); S.form = S.reject = S.pay = S.print = null; S.view = 'invoice'; S.msg = null; return render();
+    case 'recur-issue': return act(async () => { const r = await api('POST', '/api/fin/recurring/' + id + '/issue'); S.print = r.invoice.id; }, 'Фактурата е издадена.');
+    case 'recur-skip': return act(() => api('POST', '/api/fin/recurring/' + id + '/skip'), 'Този период е пропуснат.');
+    case 'recur-pause': return act(() => api('POST', '/api/fin/recurring/' + id + '/pause', { paused: true }), 'Шаблонът е на пауза.');
+    case 'recur-resume': return act(() => api('POST', '/api/fin/recurring/' + id + '/pause', { paused: false }), 'Шаблонът е подновен.');
+    case 'recur-del': if (S.confirm !== id){ S.confirm = id; return render(); } S.confirm = null; return act(() => api('DELETE', '/api/fin/recurring/' + id), 'Шаблонът е изтрит.');
+    case 'credit': S.credit = blankCredit(it); S.form = S.reject = S.pay = S.issue = S.print = null; S.view = 'invoice'; S.msg = null; return render();
+    case 'refunded': return act(() => status(id, 'paid'), 'Отбелязано като върнато на клиента.');
     case 'print': S.print = id; S.msg = null; return render();
     case 'print-close': S.print = null; return render();
     case 'do-print': return window.print();
@@ -454,7 +575,7 @@ document.addEventListener('click', e => {
 document.addEventListener('submit', e => {
   e.preventDefault(); const f = e.target, v = Object.fromEntries(new FormData(f).entries());
   if (f.id === 'item-form'){
-    const file = f.elements.file.files[0], type = f.dataset.type, id = f.dataset.id; delete v.file;
+    const type = f.dataset.type, id = f.dataset.id, file = id ? f.elements.file.files[0] : (S.scanFile || f.elements.file.files[0]); delete v.file;
     return act(async () => {
       const it = id ? await api('PUT', '/api/fin/items/' + id, { data: v }) : await api('POST', '/api/fin/items', { type, data: v });
       if (file) await api('POST', '/api/fin/items/' + it.id + '/file?name=' + encodeURIComponent(file.name), file, true);
@@ -466,11 +587,15 @@ document.addEventListener('submit', e => {
   if (f.id === 'budget-form') return act(async () => { if (f.dataset.id) await api('PUT', '/api/fin/items/' + f.dataset.id, { data: v }); else await api('POST', '/api/fin/items', { type: 'budget', data: v }); S.form = null; }, 'Бюджетът е записан.');
   if (f.id === 'user-form') return act(async () => { await api('POST', '/api/fin/users', v); S.users = await api('GET', '/api/fin/users'); }, 'Достъпът е създаден. Предайте паролата на човека.');
   if (f.id === 'set-form') return act(() => api('PUT', '/api/fin/settings', { data: Object.assign(v, { cats: v.cats.split('\n'), seller: { eik: v.s_eik, vatNo: v.s_vatNo, mol: v.s_mol, address: v.s_address, iban: v.s_iban, bank: v.s_bank, bic: v.s_bic } }) }), 'Правилата са записани.');
-  if (f.id === 'issue-form'){ collectIssue(); return act(async () => { const it = await api('POST', '/api/fin/invoices', { data: S.issue }); S.issue = null; S.print = it.id; }, 'Фактурата е издадена.'); }
+  if (f.id === 'credit-form'){ collectCredit(); const d = S.credit; return act(async () => { const r = await api('POST', '/api/fin/invoices/' + d.id + '/credit', { data: d }); S.credit = null; S.print = r.credit.id; }, 'Кредитното известие е издадено.'); }
+  if (f.id === 'issue-form' && S.issue && S.issue.recur){ collectIssue(); const d = S.issue; return act(async () => { await api(d.rid ? 'PUT' : 'POST', d.rid ? '/api/fin/recurring/' + d.rid : '/api/fin/recurring', { data: d }); S.issue = null; }, 'Шаблонът е записан.'); }
+  if (f.id === 'issue-form'){ collectIssue(); return act(async () => { const it = await api('POST', '/api/fin/invoices', { data: S.issue }); S.issue = null; S.credit = null; S.print = it.id; }, 'Фактурата е издадена.'); }
 });
 document.addEventListener('change', e => { if (e.target.id === 'f-status'){ S.filter.status = e.target.value; render(); }
   if (e.target.id === 'exp-period' && /^\d{4}-\d{2}$/.test(e.target.value)){ collectIssue(); S.expPeriod = e.target.value; render(); } });
 document.addEventListener('input', e => {
+  const cf = e.target.closest && e.target.closest('#credit-form');
+  if (cf){ collectCredit(); $('credit-totals').innerHTML = creditTotals().html; return; }
   const f = e.target.closest && e.target.closest('#issue-form');
   if (f){
     collectIssue();
@@ -482,7 +607,7 @@ document.addEventListener('input', e => {
   if (e.target.id === 'f-q'){ S.filter.q = e.target.value; const pos = e.target.selectionStart; render(); const n = $('f-q'); n.focus(); n.setSelectionRange(pos, pos); } });
 load().then(() => { const h = location.hash.slice(1); if (VIEWS.some(v => v[0] === h && v[2](role()))) return go(h); render(); }).catch(e => { $('main').innerHTML = '<div class="note crit">' + esc(e.message) + '</div>'; });
 addEventListener('hashchange', () => { const h = location.hash.slice(1); if (S.st && h !== S.view && VIEWS.some(v => v[0] === h && v[2](role()))) go(h); });
-setInterval(() => { if (!S.form && !S.reject && !S.pay && !S.issue && !S.print && !S.busy && S.view !== 'team' && document.activeElement.id !== 'f-q') load().then(render).catch(() => {}); }, 20000);
+setInterval(() => { if (!S.form && !S.reject && !S.pay && !S.issue && !S.credit && !S.print && !S.busy && S.view !== 'team' && document.activeElement.id !== 'f-q') load().then(render).catch(() => {}); }, 20000);
 })();
 </script>
 </body>
