@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id TEXT NO
 CREATE TABLE IF NOT EXISTS firms(office_id TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL, portal_token TEXT NOT NULL UNIQUE, PRIMARY KEY(office_id, id));
 CREATE TABLE IF NOT EXISTS periods(office_id TEXT NOT NULL, firm_id TEXT NOT NULL, period TEXT NOT NULL, data TEXT NOT NULL, version INTEGER NOT NULL, updated TEXT NOT NULL, PRIMARY KEY(office_id, firm_id, period));
 CREATE TABLE IF NOT EXISTS files(id TEXT PRIMARY KEY, office_id TEXT NOT NULL, firm_id TEXT NOT NULL, name TEXT NOT NULL, mime TEXT NOT NULL, size INTEGER NOT NULL, source TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, created TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS files_office ON files(office_id);
 CREATE INDEX IF NOT EXISTS files_inbox ON files(office_id, status);
 CREATE TABLE IF NOT EXISTS replies(id TEXT PRIMARY KEY, office_id TEXT NOT NULL, firm_id TEXT NOT NULL, period TEXT NOT NULL, tx_id TEXT NOT NULL, note TEXT NOT NULL, status TEXT NOT NULL, created TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS autolog(office_id TEXT NOT NULL, firm_id TEXT NOT NULL, sent_at TEXT NOT NULL, count INTEGER NOT NULL);
@@ -48,7 +49,7 @@ const sha = s => crypto.createHash('sha256').update(s).digest('hex');
 /* ---------- helpers ---------- */
 class HttpError extends Error { constructor(status, code, message){ super(message || code); this.status = status; this.code = code; } }
 const bad = (status, code, message) => { throw new HttpError(status, code, message); };
-const SEC = { 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer' };
+const SEC = { 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer', 'Permissions-Policy': 'camera=(self), microphone=(), geolocation=(), payment=()', 'Cross-Origin-Opener-Policy': 'same-origin' };
 const CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 function send(res, status, body, headers){
   const h = Object.assign({}, SEC, headers);
@@ -67,21 +68,31 @@ async function readJson(req, limit){
   const b = await readBody(req, limit || MAX_JSON);
   try { const v = JSON.parse(b.toString('utf8') || '{}'); if (!v || typeof v !== 'object') throw 0; return v; } catch (e) { bad(400, 'bad_json', 'Невалидна заявка.'); }
 }
-const cookies = req => Object.fromEntries((req.headers.cookie || '').split(';').map(c => c.trim().split('=')).filter(c => c[0]).map(c => [c[0], decodeURIComponent(c.slice(1).join('='))]));
-const ipOf = req => (TRUST_PROXY && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress || '';
+const safeDecode = v => { try { return decodeURIComponent(v); } catch (e) { return ''; } };
+const cookies = req => Object.fromEntries((req.headers.cookie || '').split(';').map(c => c.trim().split('=')).filter(c => c[0]).map(c => [c[0], safeDecode(c.slice(1).join('='))]));
+/* Зад n прокси сървъра истинският адрес е n-тият отдясно: лявата част на X-Forwarded-For я пише клиентът и не е за доверие. */
+const PROXY_HOPS = Math.max(1, parseInt(env.TRUST_PROXY_HOPS, 10) || 1);
+const ipOf = req => { if (TRUST_PROXY){ const l = String(req.headers['x-forwarded-for'] || '').split(',').map(x => x.trim()).filter(Boolean); if (l.length) return l[Math.max(0, l.length - PROXY_HOPS)]; } return req.socket.remoteAddress || ''; };
+const isHttps = req => BASE_URL ? BASE_URL.startsWith('https') : TRUST_PROXY && String(req.headers['x-forwarded-proto'] || '').split(',').pop().trim() === 'https';
 const origin = req => BASE_URL || ((TRUST_PROXY && req.headers['x-forwarded-proto']) || 'http') + '://' + req.headers.host;
+/* Връзки в имейли: само от BASE_URL или от локален адрес. Host заглавието идва от клиента и не бива да определя накъде сочи връзката за нова парола. */
+const mailOrigin = req => { if (BASE_URL || /^(localhost|127\.|\[::1\]|10\.|192\.168\.)/.test(String(req.headers.host || ''))) return origin(req); throw new HttpError(500, 'no_base_url', 'Не е зададен BASE_URL. Връзките в имейлите не могат да се изградят безопасно.'); };
 const hits = new Map();
 function limit(key, max, windowMs){
   const t = Date.now(); let h = hits.get(key);
+  if (!h && hits.size > 50000){ for (const [k, v] of hits) if (v.reset < t) hits.delete(k); if (hits.size > 50000) hits.delete(hits.keys().next().value); }
   if (!h || h.reset < t){ h = { n: 0, reset: t + windowMs }; hits.set(key, h); }
   if (++h.n > max) bad(429, 'rate_limited', 'Твърде много опити. Опитайте по-късно.');
 }
 setInterval(() => { const t = Date.now(); for (const [k, h] of hits) if (h.reset < t) hits.delete(k); q('DELETE FROM sessions WHERE expires < ?').run(t); }, 600000).unref();
 
-function hashPass(p){ const salt = crypto.randomBytes(16); return salt.toString('hex') + ':' + crypto.scryptSync(p, salt, 64).toString('hex'); }
-function checkPass(p, stored){
+const scrypt = (p, salt) => new Promise((ok, no) => crypto.scrypt(p, salt, 64, (e, k) => e ? no(e) : ok(k)));
+async function hashPass(p){ const salt = crypto.randomBytes(16); return salt.toString('hex') + ':' + (await scrypt(p, salt)).toString('hex'); }
+let DUMMY_PASS; /* за непознат имейл се прави същата работа, за да не личи по времето */
+async function checkPass(p, stored){
+  if (!stored){ DUMMY_PASS = DUMMY_PASS || await hashPass('dummy-' + rid(8)); stored = DUMMY_PASS; await checkPass(p, stored); return false; }
   const [s, h] = String(stored).split(':'); if (!s || !h) return false;
-  const a = crypto.scryptSync(p, Buffer.from(s, 'hex'), 64), b = Buffer.from(h, 'hex');
+  const a = await scrypt(p, Buffer.from(s, 'hex')), b = Buffer.from(h, 'hex');
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 function startSession(req, res, userId){
@@ -103,11 +114,14 @@ function sniff(b){
   if (b.slice(0, 4).toString('latin1') === 'RIFF' && b.slice(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
   return null;
 }
+const AI_GLOBAL = parseInt(env.AI_GLOBAL_PER_HOUR, 10) || 2000; /* общ таван на заявките към Claude срещу разходи от злоупотреба */
+const QUOTA = (parseFloat(env.OFFICE_QUOTA_MB) || 500) * 1048576;
 const KINDS = ['invoice', 'contract', 'statement', 'other'];
 const STMT = { csv: 'text/csv', txt: 'text/plain', sta: 'text/plain', mt940: 'text/plain', 940: 'text/plain', xml: 'application/xml', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pdf: 'application/pdf' };
 function storeFile(officeId, firmId, name, buf, source, note, extra){
   extra = extra || {};
   if (!buf.length) bad(400, 'empty', 'Празен файл.');
+  if ((q('SELECT COALESCE(SUM(size), 0) AS n FROM files WHERE office_id = ?').get(officeId).n + buf.length) > QUOTA) bad(413, 'quota', 'Складът за документи е пълен. Изтрийте стари файлове или се свържете с поддръжката.');
   const kind = KINDS.includes(extra.kind) ? extra.kind : 'invoice';
   let mime = sniff(buf);
   if (kind === 'statement'){
@@ -150,6 +164,7 @@ function sendMail({ to, subject, text, replyTo }){
       'Message-ID: <' + rid(12) + '@' + (addr.split('@')[1] || 'finbridge') + '>', 'MIME-Version: 1.0', 'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '',
       b64(text).replace(/(.{76})/g, '$1\r\n')].filter(x => x != null).join('\r\n');
     const steps = [['EHLO finbridge', 250]];
+    if (SMTP.user && !SMTP.secure && !/^(127\.|localhost$|::1$)/.test(SMTP.host)) return sock.destroy(), no(new HttpError(502, 'mail_insecure', 'Паролата за SMTP не се изпраща по нешифрована връзка. Ползвайте SMTP_SECURE=true.'));
     if (SMTP.user) steps.push(['AUTH LOGIN', 334], [b64(SMTP.user), 334], [b64(SMTP.pass), 235]);
     steps.push(['MAIL FROM:<' + addr + '>', 250], ['RCPT TO:<' + to + '>', 250], ['DATA', 354], [msg + '\r\n.', 250], ['QUIT', 221]);
     let buf = '', i = -1, expect = 220, done = false;
@@ -420,7 +435,7 @@ async function finApi(req, res, url, user){
     const sync = finSync(O, F); recurRun(O, F);
     let items = q('SELECT * FROM fin WHERE office_id = ? AND firm_id = ? ORDER BY created DESC').all(O, F).map(finOut);
     if (role === 'member') items = items.filter(i => i.type === 'budget' || (i.type === 'expense' && i.owner === user.id));
-    const out = { firm: { id: F, name: JSON.parse(firm.data).name, eik: JSON.parse(firm.data).eik || '' }, me: { id: user.id, email: user.email, name: user.name, role, office: !user.firm_id }, solo: !!user.solo, settings: set, scan: !!AI.key, items, cur: Core.cur(sofiaDay().slice(0, 7)), today: sofiaDay() };
+    const out = { firm: { id: F, name: JSON.parse(firm.data).name, eik: JSON.parse(firm.data).eik || '' }, me: { id: user.id, email: user.email, name: user.name, role, office: !user.firm_id }, solo: !!user.solo, settings: role === 'member' ? { cats: set.cats, receiptOver: set.receiptOver, approverLimit: set.approverLimit } : set, scan: !!AI.key, items, cur: Core.cur(sofiaDay().slice(0, 7)), today: sofiaDay() };
     if (role !== 'member'){
       out.bank = q('SELECT period, data FROM periods WHERE office_id = ? AND firm_id = ? ORDER BY period DESC LIMIT 6').all(O, F).map(r => { let d; try { d = JSON.parse(r.data); } catch (e) { d = {}; }
         const sum = sign => (d.txs || []).reduce((s, t) => s + (Math.sign(t.amount) === sign ? Math.abs(+t.amount || 0) : 0), 0); return { period: r.period, label: Core.periodLabel(r.period), out: Math.round(sum(-1) * 100) / 100, in: Math.round(sum(1) * 100) / 100 }; });
@@ -431,7 +446,7 @@ async function finApi(req, res, url, user){
   }
   if (p === '/api/fin/scan' && m === 'POST'){
     if (!AI.key) bad(503, 'scan_disabled', 'Автоматичното разчитане не е включено на този сървър. Попълнете полетата ръчно.');
-    limit('scan:' + user.id, 40, 3600000); limit('scanoffice:' + O, 400, 3600000);
+    limit('aiall', AI_GLOBAL, 3600000); limit('scan:' + user.id, 40, 3600000); limit('scanoffice:' + O, 400, 3600000);
     const buf = await readBody(req, SCAN_MAX), mime = sniff(buf);
     if (!buf.length) bad(400, 'empty', 'Празен файл.');
     if (!['image/jpeg', 'image/png', 'image/webp', 'application/pdf'].includes(mime)) bad(415, 'bad_type', 'Приемат се снимки (JPG, PNG, WebP) и PDF.');
@@ -481,7 +496,7 @@ async function finApi(req, res, url, user){
       return send(res, 200, fs.readFileSync(path.join(DATA, 'files', f.id)), { 'Content-Type': f.mime, 'Content-Disposition': "inline; filename*=UTF-8''" + encodeURIComponent(f.name), 'Content-Security-Policy': 'sandbox', 'Cache-Control': 'private, no-store' });
     }
     if (a[2] === '/file' && m === 'POST'){
-      if (r.type === 'budget' || !(canEdit || (mine && !locked))) deny();
+      if (r.type === 'budget' || r.type === 'credit' || !(canEdit || (mine && !locked))) deny();
       limit('finup:' + user.id, 120, 3600000);
       const buf = await readBody(req, MAX_FILE), old = fileRow();
       /* Разход отива при счетоводителя след одобрение; фактурите от доставчици и към клиенти веднага. */
@@ -547,7 +562,7 @@ async function finApi(req, res, url, user){
       if (to === 'approved' && d.file) q("UPDATE files SET status = 'new' WHERE id = ? AND office_id = ? AND status = 'held'").run(d.file.id, O);
       save(r, d, to);
       const u = !mine && (to === 'approved' || to === 'rejected') && SMTP.host && SMTP.from && q('SELECT email FROM users WHERE id = ?').get(r.owner);
-      if (u) sendMail({ to: u.email, subject: (to === 'approved' ? 'Одобрен' : 'Отказан') + ' разход: ' + d.f.party, text: 'Здравейте!\nЗаявката ви за ' + d.f.amount.toFixed(2) + ' към ' + d.f.party + ' от ' + d.f.date + ' е ' + (to === 'approved' ? 'одобрена.' : 'отказана. Причина: ' + note) + '\n' + origin(req) })
+      if (u) sendMail({ to: u.email, subject: (to === 'approved' ? 'Одобрен' : 'Отказан') + ' разход: ' + d.f.party, text: 'Здравейте!\nЗаявката ви за ' + d.f.amount.toFixed(2) + ' към ' + d.f.party + ' от ' + d.f.date + ' е ' + (to === 'approved' ? 'одобрена.' : 'отказана. Причина: ' + note) + '\n' + mailOrigin(req) })
         .catch(e => console.error(now(), 'имейл за решение не беше изпратен:', e.message));
       return send(res, 200, getOut(r.id));
     }
@@ -661,7 +676,7 @@ async function finApi(req, res, url, user){
       if (pass.length < 10 || pass.length > 200) bad(400, 'weak_password', 'Паролата трябва да е поне 10 знака.');
       if (q('SELECT 1 FROM users WHERE email = ?').get(email)) bad(409, 'exists', 'Вече има акаунт с този имейл.');
       if (q('SELECT COUNT(*) AS n FROM users WHERE office_id = ? AND firm_id = ?').get(O, F).n >= 300) bad(400, 'too_many', 'Достигнат е лимитът от 300 души.');
-      q('INSERT INTO users(id, office_id, email, pass, created, firm_id, crole, name) VALUES(?,?,?,?,?,?,?,?)').run(rid(9), O, email, hashPass(pass), now(), r === 'accountant' ? '' : F, r === 'accountant' ? '' : r, name);
+      q('INSERT INTO users(id, office_id, email, pass, created, firm_id, crole, name) VALUES(?,?,?,?,?,?,?,?)').run(rid(9), O, email, await hashPass(pass), now(), r === 'accountant' ? '' : F, r === 'accountant' ? '' : r, name);
       return send(res, 200, { ok: true });
     }
   }
@@ -739,14 +754,14 @@ async function handle(req, res){
     q('INSERT INTO offices(id, name, created, solo) VALUES(?,?,?,?)').run(oid, office, now(), solo ? 1 : 0);
     const fid = solo ? 'f' + crypto.randomBytes(6).toString('hex') : '';
     if (solo) q('INSERT INTO firms(office_id, id, data, portal_token) VALUES(?,?,?,?)').run(oid, fid, JSON.stringify({ name: office, eik: '', contact: '', channel: 'email', address: email, auto: false, stats: true }), rid(24));
-    q('INSERT INTO users(id, office_id, email, pass, created, firm_id, crole) VALUES(?,?,?,?,?,?,?)').run(uid, oid, email, hashPass(pass), now(), fid, solo ? 'owner' : '');
+    q('INSERT INTO users(id, office_id, email, pass, created, firm_id, crole) VALUES(?,?,?,?,?,?,?)').run(uid, oid, email, await hashPass(pass), now(), fid, solo ? 'owner' : '');
     return send(res, 200, { ok: true }, { 'Set-Cookie': startSession(req, res, uid) });
   }
   if (p === '/api/login' && m === 'POST'){
     const b = await readJson(req), email = String(b.email || '').trim().toLowerCase();
-    limit('login:' + ipOf(req) + ':' + email, 10, 900000);
+    limit('login:' + ipOf(req) + ':' + email, 10, 900000); limit('loginacct:' + email, 30, 900000); limit('loginip:' + ipOf(req), 60, 900000);
     const u = q('SELECT id, pass FROM users WHERE email = ?').get(email);
-    if (!u || !checkPass(String(b.password || ''), u.pass)) bad(401, 'bad_login', 'Грешен имейл или парола.');
+    if (!(await checkPass(String(b.password || ''), u && u.pass)) || !u) bad(401, 'bad_login', 'Грешен имейл или парола.');
     return send(res, 200, { ok: true }, { 'Set-Cookie': startSession(req, res, u.id) });
   }
   if (p === '/api/forgot' && m === 'POST'){
@@ -756,7 +771,7 @@ async function handle(req, res){
       const token = rid(32);
       q('DELETE FROM resets WHERE user_id = ? OR expires < ?').run(u.id, Date.now());
       q('INSERT INTO resets(token_hash, user_id, expires) VALUES(?,?,?)').run(sha(token), u.id, Date.now() + 3600000);
-      sendMail({ to: u.email, subject: 'Нова парола за FinBridge', text: 'Здравейте!\nЗа да зададете нова парола, отворете тази връзка до един час:\n' + origin(req) + '/reset#' + token + '\nАко не сте искали смяна, не правете нищо.' })
+      sendMail({ to: u.email, subject: 'Нова парола за FinBridge', text: 'Здравейте!\nЗа да зададете нова парола, отворете тази връзка до един час:\n' + mailOrigin(req) + '/reset#' + token + '\nАко не сте искали смяна, не правете нищо.' })
         .catch(e => console.error(now(), 'имейл за нова парола не беше изпратен:', e.message));
     }
     return send(res, 200, { ok: true, mail: !!(SMTP.host && SMTP.from) });
@@ -766,7 +781,7 @@ async function handle(req, res){
     const b = await readJson(req), pass = String(b.password || ''), r = q('SELECT user_id FROM resets WHERE token_hash = ? AND expires > ?').get(sha(String(b.token || '')), Date.now());
     if (!r) bad(400, 'bad_token', 'Връзката е невалидна или изтекла. Поискайте нова.');
     if (pass.length < 10 || pass.length > 200) bad(400, 'weak_password', 'Паролата трябва да е поне 10 знака.');
-    q('UPDATE users SET pass = ? WHERE id = ?').run(hashPass(pass), r.user_id);
+    q('UPDATE users SET pass = ? WHERE id = ?').run(await hashPass(pass), r.user_id);
     q('DELETE FROM sessions WHERE user_id = ?').run(r.user_id); q('DELETE FROM resets WHERE user_id = ?').run(r.user_id);
     return send(res, 200, { ok: true });
   }
@@ -788,7 +803,7 @@ async function handle(req, res){
     if (pass.length < 10 || pass.length > 200) bad(400, 'weak_password', 'Паролата трябва да е поне 10 знака.');
     if (q('SELECT 1 FROM users WHERE email = ?').get(email)) bad(409, 'exists', 'Вече има акаунт с този имейл.');
     if (q("SELECT COUNT(*) AS n FROM users WHERE office_id = ? AND firm_id = ''").get(O).n >= 50) bad(400, 'too_many', 'Достигнат е лимитът от 50 души в екипа.');
-    q('INSERT INTO users(id, office_id, email, pass, created) VALUES(?,?,?,?,?)').run(rid(9), O, email, hashPass(pass), now());
+    q('INSERT INTO users(id, office_id, email, pass, created) VALUES(?,?,?,?,?)').run(rid(9), O, email, await hashPass(pass), now());
     return send(res, 200, { ok: true });
   }
   if ((a = /^\/api\/users\/([A-Za-z0-9_-]{6,40})$/.exec(p)) && m === 'DELETE'){
@@ -800,9 +815,9 @@ async function handle(req, res){
   if (p === '/api/password' && m === 'POST'){
     limit('pass:' + user.id, 10, 900000);
     const b = await readJson(req), next = String(b.next || '');
-    if (!checkPass(String(b.old || ''), q('SELECT pass FROM users WHERE id = ?').get(user.id).pass)) bad(400, 'bad_password', 'Текущата парола не е вярна.');
+    if (!(await checkPass(String(b.old || ''), q('SELECT pass FROM users WHERE id = ?').get(user.id).pass))) bad(400, 'bad_password', 'Текущата парола не е вярна.');
     if (next.length < 10 || next.length > 200) bad(400, 'weak_password', 'Новата парола трябва да е поне 10 знака.');
-    q('UPDATE users SET pass = ? WHERE id = ?').run(hashPass(next), user.id);
+    q('UPDATE users SET pass = ? WHERE id = ?').run(await hashPass(next), user.id);
     q('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(user.id, sha(cookies(req).fb_s));
     return send(res, 200, { ok: true });
   }
@@ -826,7 +841,7 @@ async function handle(req, res){
     if (q("SELECT COUNT(*) AS n FROM questions WHERE office_id = ? AND firm_id = ? AND status = 'open'").get(O, firm).n >= 50) bad(400, 'too_many', 'Има твърде много отворени въпроси към тази фирма.');
     const id = rid(12); q('INSERT INTO questions(id, office_id, firm_id, period, tx_id, question, status, asked) VALUES(?,?,?,?,?,?,?,?)').run(id, O, firm, per, tx, text, 'open', now());
     const d = JSON.parse(f.data), to = String(d.address || '').trim();
-    if (SMTP.host && SMTP.from && EMAIL.test(to)) sendMail({ to, replyTo: user.email, subject: 'Въпрос от счетоводителя', text: 'Здравейте' + (d.contact ? ', ' + d.contact : '') + '!\nСчетоводителят ви има въпрос:\n' + text + '\nОтговорете тук: ' + origin(req) + '/u/' + f.portal_token })
+    if (SMTP.host && SMTP.from && EMAIL.test(to)) sendMail({ to, replyTo: user.email, subject: 'Въпрос от счетоводителя', text: 'Здравейте' + (d.contact ? ', ' + d.contact : '') + '!\nСчетоводителят ви има въпрос:\n' + text + '\nОтговорете тук: ' + mailOrigin(req) + '/u/' + f.portal_token })
       .catch(e => console.error(now(), 'имейл с въпрос не беше изпратен:', e.message));
     return send(res, 200, { id });
   }
@@ -900,7 +915,7 @@ async function handle(req, res){
   }
   if (p === '/api/ai' && m === 'POST'){
     if (!AI.key) bad(503, 'sampling_disabled', 'Не е зададен ANTHROPIC_API_KEY.');
-    limit('ai:' + O, 300, 3600000);
+    limit('aiall', AI_GLOBAL, 3600000); limit('ai:' + O, 300, 3600000);
     const b = await readJson(req, MAX_AI), prompt = String(b.prompt || '');
     if (!prompt || prompt.length > 300000) bad(400, 'prompt_too_large');
     const images = (Array.isArray(b.images) ? b.images : []).slice(0, 5).map(i => ({ mime: String(i && i.mime), data: String(i && i.data) }));
@@ -909,10 +924,11 @@ async function handle(req, res){
   }
   if (p === '/api/email' && m === 'POST'){
     if (!(SMTP.host && SMTP.from)) bad(503, 'mail_disabled', 'Изпращането на имейли не е настроено.');
-    limit('mail:' + O, 60, 3600000);
+    const age = Date.now() - Date.parse(q('SELECT created FROM offices WHERE id = ?').get(O).created);
+    limit('mail:' + O, age < 3 * 864e5 ? 10 : 60, 3600000);
     const b = await readJson(req), f = q('SELECT data FROM firms WHERE office_id = ? AND id = ?').get(O, String(b.firm || ''));
     if (!f) bad(404, 'no_firm');
-    const to = String(JSON.parse(f.data).address || '').trim(), text = String(b.text || '').slice(0, 20000);
+    const to = String(JSON.parse(f.data).address || '').trim(), text = String(b.text || '').slice(0, 20000) + '\n\n— Изпратено през FinBridge от ' + user.email;
     if (!EMAIL.test(to)) bad(400, 'bad_email', 'Фирмата няма валиден имейл адрес.');
     if (!text.trim()) bad(400, 'empty', 'Празно съобщение.');
     await sendMail({ to, subject: String(b.subject || 'Липсващи документи'), text, replyTo: user.email });
@@ -922,6 +938,7 @@ async function handle(req, res){
 }
 
 const server = http.createServer((req, res) => {
+  if (isHttps(req)) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   handle(req, res).catch(e => {
     if (!(e instanceof HttpError)) console.error(now(), req.method, req.url, e);
     if (res.headersSent) return res.end();

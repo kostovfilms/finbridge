@@ -535,7 +535,7 @@ const Core = (() => {
 
   function csv(rows, delim){
     delim = delim || ';';
-    return rows.map(r => r.map(v => { const s = v == null ? '' : String(v); return s.includes('"') || s.includes(delim) || /[\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(delim)).join('\r\n');
+    return rows.map(r => r.map(v => { let s = v == null ? '' : String(v); if (/^[=+\-@\t\r]/.test(s) && !/^[-+]?\d+([.,]\d+)?$/.test(s)) s = "'" + s; return s.includes('"') || s.includes(delim) || /[\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(delim)).join('\r\n');
   }
   const num = (n, dec) => n == null ? '' : n.toFixed(2).replace('.', dec || ',');
   const COLS = [
@@ -586,7 +586,7 @@ const Core = (() => {
     return csv(rows);
   }
 
-  return {r2, parseAmount, parseDate, splitCSV, parseTable, parseMT940, parseCamt, parseStatement, classify, withKeys, nameSim, nameTokens,
+  return {csv, r2, parseAmount, parseDate, splitCSV, parseTable, parseMT940, parseCamt, parseStatement, classify, withKeys, nameSim, nameTokens,
     findMatches, decideMatch, docOk, validateDoc, CATS, CAT_LABEL, ACCOUNTS, VATM, supplierKey, cpKey, codingFor, findGroup, exportLedger, exportPostings, eikValid, encode1251, COLS, DEFAULT_COLS, TYPES, periodLabel, shiftPeriod, deadline, cur, fd, money, reminderText, exportDocs, exportLines, exportMissing, dayDiff};
 })();
 /*CORE-END*/

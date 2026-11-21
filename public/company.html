@@ -230,7 +230,7 @@ const Fin = (() => {
       rows.push([fmtDate(date), 'Банково постъпление', i.number || '', i.party, i.inv ? i.inv.buyer.eik : '', 'Плащане по фактура' + (i.number ? ' ' + i.number : ''), '503', '411', num(amount)]);
     return rows;
   }
-  function toCsv(rows){ return '﻿' + rows.map(r => r.map(c => { const s = String(c == null ? '' : c); return /[";\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(';')).join('\r\n'); }
+  function toCsv(rows){ return '﻿' + rows.map(r => r.map(c => { let s = String(c == null ? '' : c); if (/^[=+\-@\t\r]/.test(s) && !/^[-+]?\d+([.,]\d+)?$/.test(s)) s = "'" + s; return /[";\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(';')).join('\r\n'); }
   return { CATS, DEFAULTS, PAY, STATUS, ROLES, r2, addDays, dayDiff, money, canApprove, budgetUsage, violations, forecast, aging, byCat, summary, toCsv, matchBank, dunningText, fmtDate, left, addMonths, REV, RATES, invoiceTotals, salesLedger, salesPostings };
 })();
 /*FIN-END*/
