@@ -1,0 +1,35 @@
+# ПРЕДЛОЖЕНИЕ, не е активна конфигурация. Не се чете от Render, докато не го преименувате на render.yaml.
+# Платен план с постоянен диск: Starter уеб сървис (около 7 долара на месец) и диск (0,25 долара на GB на месец).
+# Проверете актуалните цени в Render преди да преминете. Смяната на плана започва таксуване.
+#
+# Ограничения на диска: само един екземпляр, кратка пауза при всяко качване, дневен снимък, пазен най-малко 7 дни.
+# Снимъкът на диск може да хване базата по средата на запис, затова правете и копие със scripts/snapshot.js.
+services:
+  - type: web
+    name: finbridge
+    runtime: node
+    plan: starter
+    buildCommand: "true"
+    startCommand: npm start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: TRUST_PROXY
+        value: "true"
+      - key: DATA_DIR
+        value: /data
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+    disk:
+      name: finbridge-data
+      mountPath: /data
+      sizeGB: 1

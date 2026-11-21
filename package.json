@@ -3,10 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "description": "FinBridge: счетоводно управление за кантори и финансово управление за фирми",
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "start": "node --no-warnings server.js",
-    "test": "node --no-warnings test/core.test.js && node --no-warnings test/fin.test.js && node --no-warnings test/api.test.js && node --no-warnings test/api2.test.js && node --no-warnings test/api3.test.js && node --no-warnings test/api4.test.js",
-    "test:e2e": "node --no-warnings test/e2e.js && node --no-warnings test/e2e-company.js"
+    "test": "node --no-warnings test/core.test.js && node --no-warnings test/fin.test.js && node --no-warnings test/api.test.js && node --no-warnings test/api2.test.js && node --no-warnings test/api3.test.js && node --no-warnings test/api4.test.js && node --no-warnings test/api5.test.js && node --no-warnings test/api6.test.js && node --no-warnings test/backup.test.js && node --no-warnings test/audit.test.js",
+    "test:e2e": "node --no-warnings test/e2e.js && node --no-warnings test/e2e-company.js && node --no-warnings test/e2e-mobile.js && node --no-warnings test/e2e-credit.js && node --no-warnings test/e2e-xss.js"
   }
 }
