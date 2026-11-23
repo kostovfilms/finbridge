@@ -94,4 +94,22 @@ t('invoice totals, sales ledger and sales postings',()=>{
     ['08.11.2026','0000000004','501','703','200.00'],['08.11.2026','0000000004','501','4532','18.00'],['10.11.2026','0000000001','503','411','400.00'],['15.11.2026','77','503','411','300.00'],['20.11.2026','0000000002','503','411','120.00']]);
   assert.equal(Fin.salesLedger(items,'2026-09').length,1);
 });
+t('credit notes lower what is left, so a payment for the reduced amount matches the invoice',()=>{
+  const inv=it('i1','invoice','open',600,{party:'Алфа Трейд ООД',number:'0000000005',date:'2026-11-03',due:'2026-11-17',credited:120,paid:0});
+  assert.equal(Fin.left(inv),480);assert.equal(Fin.left({...inv,paid:100}),380);
+  const txs=[{key:'2026-11/t1',date:'2026-11-10',cp:'АЛФА ТРЕЙД ООД',desc:'Плащане по фактура 0000000005',amount:480}];
+  const res=Fin.matchBank([inv],txs,(a,b)=>a.toLowerCase().includes('алфа')&&b.toLowerCase().includes('алфа')?1:0);
+  assert.deepEqual(res.auto.map(a=>[a.id,a.amount,!!a.part]),[['i1',480,false]]);
+  const full=Fin.matchBank([{...inv,credited:0}],txs,()=>1);assert.equal(full.auto.length,0,'без кредитно известие 480 е само част от 600');
+});
+t('schedules: month, quarter and year steps keep the chosen day and never overflow short months',()=>{
+  assert.equal(Fin.addMonths('2026-11-05',1,5),'2026-12-05');assert.equal(Fin.addMonths('2026-12-05',1,5),'2027-01-05');assert.equal(Fin.addMonths('2026-11-05',3,5),'2027-02-05');assert.equal(Fin.addMonths('2026-11-05',12,5),'2027-11-05');
+  assert.equal(Fin.addMonths('2027-01-28',1,28),'2027-02-28');assert.equal(Fin.addMonths('2026-01-31',1,40),'2026-02-28');assert.equal(Fin.addMonths('2026-12-28',-12,28),'2025-12-28');
+});
+t('credit notes appear in the ledger with a minus sign and reverse the postings',()=>{
+  const inv={id:'a',type:'invoice',status:'open',amount:120,date:'2026-11-03',number:'0000000001',party:'Клиент',pay:'bank',inv:{buyer:{eik:'123456789',vatNo:''},seller:{},lines:[{name:'Услуга'}],rate:20,net:100,vat:20,vatNote:'',rev:'703'}};
+  const cr={id:'b',type:'credit',status:'issued',amount:60,date:'2026-11-08',number:'0000000002',party:'Клиент',pay:'bank',ref:{number:'0000000001',date:'2026-11-03',reason:'Отстъпка'},inv:{buyer:{eik:'123456789',vatNo:''},seller:{},lines:[{name:'Услуга'}],rate:20,net:50,vat:10,vatNote:'',rev:'703'}};
+  const L=Fin.salesLedger([inv,cr],'2026-11','.');assert.deepEqual(L[2].slice(1,3).concat(L[2].slice(7,11)),['Кредитно известие','0000000002','-50.00','20%','-10.00','-60.00']);
+  const P=Fin.salesPostings([inv,cr],'2026-11','.').slice(1).filter(r=>r[2]==='0000000002').map(r=>[r[6],r[7],r[8]]);assert.deepEqual(P,[['703','411','50.00'],['4532','411','10.00']]);
+});
 console.log('FIN: all '+n+' tests passed');
