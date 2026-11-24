@@ -21,7 +21,7 @@ const Core = new Function(fs.readFileSync(path.join(__dirname, 'public', 'index.
 fs.mkdirSync(path.join(DATA, 'files'), { recursive: true });
 const db = new DatabaseSync(path.join(DATA, 'finbridge.db'));
 db.exec(`
-PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;
+PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;
 CREATE TABLE IF NOT EXISTS offices(id TEXT PRIMARY KEY, name TEXT NOT NULL, created TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, office_id TEXT NOT NULL REFERENCES offices(id), email TEXT NOT NULL UNIQUE, pass TEXT NOT NULL, created TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions(token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires INTEGER NOT NULL);
@@ -120,8 +120,13 @@ const ACTIONS = [
   [/^POST \/api\/email$/, 'Изпратен имейл до клиент', b => b.subject],
   [/^POST \/api\/files$/, 'Качен файл'],
   [/^DELETE \/api\/files\/[^/]+$/, 'Изтрит файл'],
+  [/^GET \/api\/files\/[^/]+$/, 'Отворен клиентски файл', null, 600000],
+  [/^POST \/api\/files\/[^/]+\/done$/, 'Приключен клиентски файл'],
   [/^POST \/api\/questions$/, 'Въпрос към клиент', b => b.text]
 ];
+/* Един брояч за всички изходящи писма на кантора: ръчни, автоматични напомняния и въпроси. */
+function mailOk(O){ const o = q('SELECT created FROM offices WHERE id = ?').get(O), age = o ? Date.now() - Date.parse(o.created) : 0; try { limit('mail:' + O, age < 3 * 864e5 ? 10 : 60, 3600000); return true; } catch (e) { return false; } }
+const PORTAL = firm => ({ id: '', office_id: firm.office_id, firm_id: firm.id, email: 'клиент през портала' });
 const lastLog = new Map();
 function autoLog(req, res){
   const u = req.fbUser; if (!u || res.statusCode >= 400 || req.fbLogged) return;
@@ -150,7 +155,9 @@ function totpStep(secret, code, after){
 /* Код от приложението или еднократен резервен код. */
 function useCode(u, code){
   code = String(code || '').replace(/\s/g, '');
-  if (/^\d{6}$/.test(code)){ const st = totpStep(u.totp, code, u.totp_step); if (!st) return ''; q('UPDATE users SET totp_step = ? WHERE id = ?').run(st, u.id); return 'totp'; }
+  /* Редът се чете наново и кодът се изразходва с условен запис: между четенето и записа няма await, така че едновременни заявки не минават с един код. */
+  u = q('SELECT id, totp, totp_step, recovery FROM users WHERE id = ?').get(u.id); if (!u || !u.totp) return '';
+  if (/^\d{6}$/.test(code)){ const st = totpStep(u.totp, code, u.totp_step); if (!st) return ''; return q('UPDATE users SET totp_step = ? WHERE id = ? AND totp_step < ?').run(st, u.id, st).changes ? 'totp' : ''; }
   const h = sha(code.toLowerCase().replace(/-/g, '')); let list; try { list = JSON.parse(u.recovery); } catch (e) { list = []; }
   if (code.length < 8 || !list.includes(h)) return '';
   q('UPDATE users SET recovery = ? WHERE id = ?').run(JSON.stringify(list.filter(x => x !== h)), u.id); return 'recovery';
@@ -226,7 +233,7 @@ function missingFor(officeId, firmId, beforePeriod){
     if (beforePeriod && r.period >= beforePeriod) continue;
     let p; try { p = JSON.parse(r.data); } catch (e) { continue; }
     if (p.closed) continue;
-    for (const t of p.txs || []) if (t.needsDoc && !t.docId && t.amount < 0) out.push({ period: r.period, tx: t, replied: pending.has(r.period + '/' + t.id) });
+    for (const t of Array.isArray(p.txs) ? p.txs : []) if (t && typeof t === 'object' && t.needsDoc && !t.docId && t.amount < 0) out.push({ period: r.period, tx: t, replied: pending.has(r.period + '/' + t.id) });
   }
   return out.sort((a, b) => String(a.tx.date).localeCompare(String(b.tx.date)));
 }
@@ -344,8 +351,9 @@ async function remindTick(){
       if (!d.auto || !EMAIL.test(to)) continue;
       const last = q('SELECT MAX(sent_at) AS t FROM autolog WHERE office_id = ? AND firm_id = ?').get(f.office_id, f.id).t;
       if (last && Date.now() - Date.parse(last) < REMIND.days * 864e5 - 60000) continue;
-      const open = missingFor(f.office_id, f.id, t.period).filter(x => !x.replied);
+      let open; try { open = missingFor(f.office_id, f.id, t.period).filter(x => !x.replied); } catch (e) { console.error(now(), 'напомняне: повредени данни за фирма', f.id, e.message); continue; }
       if (!open.length) continue;
+      if (!mailOk(f.office_id)) continue; /* #5: автоматичните писма влизат в общия лимит на кантората */
       const per = open[open.length - 1].period, list = open.filter(x => x.period === per).map(x => x.tx);
       const text = Core.reminderText({ contact: d.contact, portal: BASE_URL ? BASE_URL + '/u/' + f.portal_token : '' }, list, per);
       const u = q("SELECT email FROM users WHERE office_id = ? AND firm_id = '' ORDER BY created LIMIT 1").get(f.office_id);
@@ -432,12 +440,14 @@ function finSync(O, F){
 }
 function finSettings(O, F){ const r = q('SELECT data FROM finset WHERE office_id = ? AND firm_id = ?').get(O, F); return Object.assign({}, Fin.DEFAULTS, r ? JSON.parse(r.data) : {}); }
 /* ---------- издаване на фактури и повтарящи се фактури ---------- */
-const okDate = v => /^\d{4}-\d{2}-\d{2}$/.test(v || '') && !isNaN(Date.parse(v)) ? v : '';
+/* Истинска календарна дата между 2000 и 2100 г. (31 февруари не минава). */
+const okDate = v => { if (!/^\d{4}-\d{2}-\d{2}$/.test(v || '')) return ''; const d = new Date(v + 'T00:00:00Z'); return !isNaN(d) && d.toISOString().slice(0, 10) === v && v >= '2000-01-01' && v <= '2100-12-31' ? v : ''; };
+const lastInvoiceDate = (O, F) => q("SELECT data FROM fin WHERE office_id = ? AND firm_id = ? AND type IN ('invoice', 'credit')").all(O, F).reduce((mx, x) => { const f = JSON.parse(x.data).f; return f.inv && f.date > mx ? f.date : mx; }, '');
 const decN = (v, k) => Math.round((+String(v == null ? '' : v).replace(',', '.') || 0) * k) / k;
 const lineClean = (b, sv) => (Array.isArray(b.lines) ? b.lines : []).slice(0, 50).map(l => ({ name: sv(l && l.name, 200), unit: sv(l && l.unit, 10) || 'бр.', qty: decN(l && l.qty, 1000), price: decN(l && l.price, 100) })).filter(l => l.name);
 function invoiceClean(set, fd, b){
   const sv = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, n), sl = set.seller || {};
-  const seller = { name: fd.name, eik: sl.eik || fd.eik || '', vatNo: sl.vatNo || '', address: sl.address || '', mol: sl.mol || '', iban: sl.iban || '', bank: sl.bank || '', bic: sl.bic || '' };
+  const seller = { name: sl.name || fd.name, eik: sl.eik || fd.eik || '', vatNo: sl.vatNo || '', address: sl.address || '', mol: sl.mol || '', iban: sl.iban || '', bank: sl.bank || '', bic: sl.bic || '' };
   if (!seller.eik || !seller.address || !seller.mol) bad(400, 'no_seller', 'Първо попълнете данните на фирмата за фактурите в „Екип и правила“: ЕИК, адрес и МОЛ.');
   const party = sv(b.party, 120), buyer = { eik: sv(b.eik, 15).replace(/\s/g, ''), vatNo: sv(b.vatNo, 20).replace(/\s/g, '').toUpperCase(), address: sv(b.address, 200), mol: sv(b.mol, 80) };
   if (!party) bad(400, 'bad_data', 'Въведете получател.');
@@ -452,7 +462,11 @@ function invoiceClean(set, fd, b){
 }
 function issueInvoice(O, F, owner, who, b, extra){
   const firm = q('SELECT * FROM firms WHERE office_id = ? AND id = ?').get(O, F), set = finSettings(O, F), c = invoiceClean(set, JSON.parse(firm.data), b);
-  const day = okDate(b.date) || sofiaDay(), n = Math.max(+set.invNext || 1, lastInvoiceNo(O, F) + 1), id = rid(12), at = now();
+  if (b.date != null && b.date !== '' && !okDate(b.date)) bad(400, 'bad_date', 'Невалидна дата на фактурата.');
+  const day = okDate(b.date) || sofiaDay();
+  if (day > sofiaDay()) bad(400, 'bad_date', 'Датата на фактурата не може да е в бъдещето.');
+  { const ld = lastInvoiceDate(O, F); if (ld && day < ld) bad(400, 'bad_date', 'Датата не може да е преди последната издадена фактура (' + ld.split('-').reverse().join('.') + '): номерата и датите вървят в един ред.'); }
+  const n = Math.max(+set.invNext || 1, lastInvoiceNo(O, F) + 1), id = rid(12), at = now();
   const f = { party: c.party, number: String(n).padStart(10, '0'), date: day, due: okDate(b.due), amount: c.t.total, cat: '', budget: '', pay: c.pay, note: c.note,
     inv: { buyer: c.buyer, seller: c.seller, lines: c.t.rows.map(l => ({ name: l.name, unit: l.unit, qty: l.qty, price: l.price, sum: l.sum })), rate: c.rate, net: c.t.net, vat: c.t.vat, vatNote: c.vatNote, rev: c.rev } };
   const d = { f, by: who, log: [{ at, who, what: 'issued', note: extra && extra.note }] }; if (c.pay === 'cash') d.paidAt = day;
@@ -560,9 +574,12 @@ async function finApi(req, res, url, user){
     const issuedLock = () => { if (d.f.inv) bad(403, 'issued', 'Издадена фактура не се променя и не се изтрива. Анулирайте я и издайте нова.'); };
     if (!a[2] && m === 'PUT'){
       issuedLock(); if (!canEdit) deny();
-      d.f = finClean(r.type, (await readJson(req)).data || {}); d.log.push({ at: now(), who, what: 'edited' });
+      const was = d.f; d.f = finClean(r.type, (await readJson(req)).data || {}); d.log.push({ at: now(), who, what: 'edited' });
+      /* Промяна на сума, контрагент или дата на одобрен запис го връща за одобрение; иначе лимитът на одобряващия се заобикаля. */
+      const reapprove = r.status === 'approved' && r.type !== 'invoice' && role !== 'owner' && (was.amount !== d.f.amount || was.party !== d.f.party || was.date !== d.f.date);
+      if (reapprove) d.log.push({ at: now(), who, what: 'submitted', note: 'върнат за одобрение след редакция' });
       if (paidSum(d) > 0 && d.f.amount - settled(d) <= 0.011) bad(400, 'bad_data', 'Сумата трябва да е по-голяма от вече платеното (' + paidSum(d).toFixed(2) + ').');
-      save(r, d, r.status === 'rejected' ? 'submitted' : r.status); return send(res, 200, getOut(r.id));
+      save(r, d, r.status === 'rejected' || reapprove ? 'submitted' : r.status); return send(res, 200, getOut(r.id));
     }
     if (!a[2] && m === 'DELETE'){
       issuedLock();
@@ -619,7 +636,8 @@ async function finApi(req, res, url, user){
         note = 'потвърдено по банково плащане';
       }
       if (r.type === 'credit'){ if (role === 'member') deny(); ok = (from === 'open' && to === 'paid') || (from === 'paid' && to === 'open'); }
-      else if (r.type === 'invoice'){ if (role === 'member') deny(); ok = (from === 'open' && (to === 'paid' || (to === 'void' && !(d.credits || []).length))) || (from !== 'open' && from !== 'credited' && to === 'open'); }
+      else if (r.type === 'invoice'){ if (role === 'member') deny(); if (to === 'void' && from === 'open' && paidSum(d) > 0) bad(409, 'has_payments', 'По фактурата има получени плащания. Издайте кредитно известие вместо анулиране.');
+        ok = (from === 'open' && (to === 'paid' || (to === 'void' && !(d.credits || []).length))) || (from === 'paid' && to === 'open'); }
       else if (r.type !== 'budget'){
         if (to === 'approved' || to === 'rejected'){
           const c = Fin.canApprove(item, me, set); if (!c.ok) bad(403, 'forbidden', c.why);
@@ -635,7 +653,8 @@ async function finApi(req, res, url, user){
       if (from === 'paid'){
         const keys = [d.bankTx].concat((d.pays || []).map(p => p.bank)).filter(Boolean);
         if (keys.length){ d.noAuto = true; d.skip = [...new Set((d.skip || []).concat(keys))].slice(-20); }
-        d.pays = [];
+        /* Вноските остават. Ако те покриват цялата сума, се маха само последната. */
+        if ((d.pays || []).length && d.f.amount - settled(d) <= 0.011) d.pays.pop();
       }
       if (tx){ d.bankTx = tx.key; hintFile(O, d, tx.key); } else delete d.bankTx;
       if (to === 'approved' && d.file) q("UPDATE files SET status = 'new' WHERE id = ? AND office_id = ? AND status = 'held'").run(d.file.id, O);
@@ -653,7 +672,7 @@ async function finApi(req, res, url, user){
     const bal = Math.round((+String(b.balance).replace(',', '.') || 0) * 100) / 100;
     const data = { balance: Math.abs(bal) < 1e10 ? bal : 0, balanceDate: /^\d{4}-\d{2}-\d{2}$/.test(b.balanceDate || '') ? b.balanceDate : sofiaDay(), approverLimit: n(b.approverLimit), receiptOver: n(b.receiptOver), cats: cats.length ? [...new Set(cats)] : Fin.DEFAULTS.cats };
     const sv = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, n), sb = b.seller;
-    data.seller = sb && typeof sb === 'object' ? { eik: sv(sb.eik, 15).replace(/\s/g, ''), vatNo: sv(sb.vatNo, 20).replace(/\s/g, '').toUpperCase(), address: sv(sb.address, 200), mol: sv(sb.mol, 80), iban: sv(sb.iban, 42).replace(/\s/g, '').toUpperCase(), bank: sv(sb.bank, 80), bic: sv(sb.bic, 15).toUpperCase() } : set.seller || {};
+    data.seller = sb && typeof sb === 'object' ? { ...(sv(sb.name, 160) ? { name: sv(sb.name, 160) } : {}), eik: sv(sb.eik, 15).replace(/\s/g, ''), vatNo: sv(sb.vatNo, 20).replace(/\s/g, '').toUpperCase(), address: sv(sb.address, 200), mol: sv(sb.mol, 80), iban: sv(sb.iban, 42).replace(/\s/g, '').toUpperCase(), bank: sv(sb.bank, 80), bic: sv(sb.bic, 15).toUpperCase() } : set.seller || {};
     if (data.seller.eik && !/^\d{9,13}$/.test(data.seller.eik)) bad(400, 'bad_eik', 'ЕИК трябва да е от 9 до 13 цифри.');
     data.invNext = set.invNext || 1;
     if (b.invNext != null && String(b.invNext).trim() !== ''){
@@ -789,6 +808,7 @@ async function handle(req, res){
       if (!hit) bad(404, 'no_tx', 'Това плащане вече не е в списъка.');
       if (hit.replied) bad(409, 'exists', 'Вече сте изпратили обяснение за това плащане.');
       q('INSERT INTO replies(id, office_id, firm_id, period, tx_id, note, status, created) VALUES(?,?,?,?,?,?,?,?)').run(rid(12), firm.office_id, firm.id, hit.period, hit.tx.id, note, 'new', now());
+      logAct(req, PORTAL(firm), 'Портал: обяснение за плащане', note);
       return send(res, 200, { ok: true });
     }
     if (a[2] === '/answer' && m === 'POST'){
@@ -797,12 +817,14 @@ async function handle(req, res){
       if (text.length < 1) bad(400, 'bad_note', 'Напишете отговор.');
       const r = q("UPDATE questions SET answer = ?, status = 'answered', answered = ? WHERE id = ? AND office_id = ? AND firm_id = ? AND status = 'open'").run(text, now(), String(b.id || ''), firm.office_id, firm.id);
       if (!r.changes) bad(404, 'no_question', 'Този въпрос вече е затворен.');
+      logAct(req, PORTAL(firm), 'Портал: отговор на въпрос', text);
       return send(res, 200, { ok: true });
     }
     if (a[2] === '/upload' && m === 'POST'){
       limit('up:' + a[1], 60, 3600000);
       const buf = await readBody(req, MAX_FILE);
       storeFile(firm.office_id, firm.id, url.searchParams.get('name'), buf, 'client', url.searchParams.get('note'), { kind: url.searchParams.get('kind'), tx: url.searchParams.get('tx'), period: url.searchParams.get('period') });
+      logAct(req, PORTAL(firm), 'Портал: качен документ', url.searchParams.get('name'));
       return send(res, 200, { ok: true });
     }
     bad(405, 'method');
@@ -910,8 +932,11 @@ async function handle(req, res){
     bad(404, 'not_found');
   }
   if (must2fa(user) && p !== '/api/me') bad(403, 'need_2fa', 'За този акаунт двуфакторният вход е задължителен. Включете го от „Сигурност".');
+  /* Счетоводител, поканен от самостоятелна фирма, води счетоводството ѝ, но не управлява акаунта: не трие фирмата, не кани други и не чете журнала. */
+  const guest = !!user.solo && !user.firm_id;
+  if (guest && ((p.startsWith('/api/users') && m !== 'GET') || (/^\/api\/firms\//.test(p) && (m === 'DELETE' || (m === 'PUT' && !q('SELECT 1 FROM firms WHERE office_id = ? AND id = ?').get(O, decodeURIComponent(p.split('/')[3] || ''))))))) bad(403, 'forbidden', 'Това действие е само за собственика на фирмата.');
   if (p === '/api/audit' && m === 'GET'){
-    if (user.firm_id && user.crole !== 'owner') bad(403, 'forbidden', 'Журналът е достъпен само за собственика.');
+    if ((user.firm_id && user.crole !== 'owner') || guest) bad(403, 'forbidden', 'Журналът е достъпен само за собственика.');
     const before = parseInt(url.searchParams.get('before'), 10) || 9e15, w = user.firm_id ? ' AND firm_id = ?' : '', args = user.firm_id ? [O, before, user.firm_id] : [O, before];
     const rows = q('SELECT id, at, email, action, detail, ip, firm_id AS firm FROM audit WHERE office_id = ? AND id < ?' + w + ' ORDER BY id DESC LIMIT 100').all(...args);
     return send(res, 200, { rows, more: rows.length === 100 });
@@ -966,7 +991,7 @@ async function handle(req, res){
     if (q("SELECT COUNT(*) AS n FROM questions WHERE office_id = ? AND firm_id = ? AND status = 'open'").get(O, firm).n >= 50) bad(400, 'too_many', 'Има твърде много отворени въпроси към тази фирма.');
     const id = rid(12); q('INSERT INTO questions(id, office_id, firm_id, period, tx_id, question, status, asked) VALUES(?,?,?,?,?,?,?,?)').run(id, O, firm, per, tx, text, 'open', now());
     const d = JSON.parse(f.data), to = String(d.address || '').trim();
-    if (SMTP.host && SMTP.from && EMAIL.test(to)) sendMail({ to, replyTo: user.email, subject: 'Въпрос от счетоводителя', text: 'Здравейте' + (d.contact ? ', ' + d.contact : '') + '!\nСчетоводителят ви има въпрос:\n' + text + '\nОтговорете тук: ' + mailOrigin(req) + '/u/' + f.portal_token })
+    if (SMTP.host && SMTP.from && EMAIL.test(to) && mailOk(O)) sendMail({ to, replyTo: user.email, subject: 'Въпрос от счетоводителя', text: 'Здравейте' + (d.contact ? ', ' + d.contact : '') + '!\nСчетоводителят ви има въпрос:\n' + text + '\nОтговорете тук: ' + mailOrigin(req) + '/u/' + f.portal_token })
       .catch(e => console.error(now(), 'имейл с въпрос не беше изпратен:', e.message));
     return send(res, 200, { id });
   }
@@ -1012,6 +1037,10 @@ async function handle(req, res){
       if (!q('SELECT 1 FROM firms WHERE office_id = ? AND id = ?').get(O, firm)) bad(404, 'no_firm', 'Фирмата не съществува.');
       const b = await readJson(req, 2 * MAX_JSON), d = b.data;
       if (!d || typeof d !== 'object' || !Array.isArray(d.txs) || !Array.isArray(d.docs)) bad(400, 'bad_data');
+      const isObj = x => x && typeof x === 'object' && !Array.isArray(x);
+      if (!d.txs.every(isObj) || !d.docs.every(isObj) || (d.reminders != null && !Array.isArray(d.reminders))) bad(400, 'bad_data', 'Повредени данни за периода.');
+      { const y = +per.slice(0, 4), cy = +sofiaDay().slice(0, 4); if (y < 2015 || y > cy + 1) bad(400, 'bad_period', 'Периодът е извън допустимите години.'); }
+      if (b.version != null && cur && +b.version !== cur.version) bad(409, 'conflict', 'Колега е променил този месец междувременно. Заредена е неговата версия; повторете последната си промяна.');
       d.firm = firm; d.period = per; if (!Array.isArray(d.reminders)) d.reminders = [];
       const v = (cur ? cur.version : 0) + 1;
       q('INSERT INTO periods(office_id, firm_id, period, data, version, updated) VALUES(?,?,?,?,?,?) ON CONFLICT(office_id, firm_id, period) DO UPDATE SET data = excluded.data, version = excluded.version, updated = excluded.updated')
@@ -1021,7 +1050,7 @@ async function handle(req, res){
     }
     if (m === 'DELETE'){ q('DELETE FROM periods WHERE office_id = ? AND firm_id = ? AND period = ?').run(O, firm, per); return send(res, 200, { ok: true }); }
   }
-  if ((a = /^\/api\/kv\/([a-z]{1,20})$/.exec(p))){
+  if ((a = /^\/api\/kv\/(rules)$/.exec(p))){
     if (m === 'GET'){ const r = q('SELECT data FROM kv WHERE office_id = ? AND key = ?').get(O, a[1]); return send(res, 200, r ? { exists: true, data: JSON.parse(r.data) } : { exists: false }); }
     if (m === 'PUT'){ const b = await readJson(req); if (!b.data || typeof b.data !== 'object') bad(400, 'bad_data');
       q('INSERT INTO kv(office_id, key, data) VALUES(?,?,?) ON CONFLICT(office_id, key) DO UPDATE SET data = excluded.data').run(O, a[1], JSON.stringify(b.data)); return send(res, 200, { ok: true }); }
@@ -1049,8 +1078,7 @@ async function handle(req, res){
   }
   if (p === '/api/email' && m === 'POST'){
     if (!(SMTP.host && SMTP.from)) bad(503, 'mail_disabled', 'Изпращането на имейли не е настроено.');
-    const age = Date.now() - Date.parse(q('SELECT created FROM offices WHERE id = ?').get(O).created);
-    limit('mail:' + O, age < 3 * 864e5 ? 10 : 60, 3600000);
+    if (!mailOk(O)) bad(429, 'rate_limited', 'Достигнат е лимитът за имейли за този час. Опитайте по-късно.');
     const b = await readJson(req), f = q('SELECT data FROM firms WHERE office_id = ? AND id = ?').get(O, String(b.firm || ''));
     if (!f) bad(404, 'no_firm');
     const to = String(JSON.parse(f.data).address || '').trim(), text = String(b.text || '').slice(0, 20000) + '\n\n— Изпратено през FinBridge от ' + user.email;

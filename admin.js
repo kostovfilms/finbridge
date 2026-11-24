@@ -3,6 +3,7 @@
 const path = require('node:path'), crypto = require('node:crypto');
 const { DatabaseSync } = require('node:sqlite');
 const db = new DatabaseSync(path.join(path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data')), 'finbridge.db'));
+db.exec('PRAGMA busy_timeout = 5000');
 const hash = p => { const s = crypto.randomBytes(16); return s.toString('hex') + ':' + crypto.scryptSync(p, s, 64).toString('hex'); };
 const [cmd, a, b, c] = process.argv.slice(2);
 const user = e => db.prepare('SELECT * FROM users WHERE email = ?').get(String(e || '').toLowerCase());

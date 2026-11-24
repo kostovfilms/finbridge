@@ -399,7 +399,8 @@ const Core = (() => {
     if (!(doc.total > 0)) return out;
     const num = String(doc.number || '').replace(/\D/g, '').replace(/^0+/, '');
     for (const t of txs){
-      if (t.docId || !(t.amount < 0)) continue;
+      /* Кредитно известие от доставчик се засича с върнати пари (постъпление), а не с плащане. */
+      if (t.docId || !((doc.docType === 'credit_note' ? -t.amount : t.amount) < 0)) continue;
       if (Math.abs(Math.abs(t.amount) - doc.total) > 0.011) continue;
       let diff = null;
       if (doc.date){ diff = dayDiff(t.date, doc.date); if (diff < -15 || diff > 120) continue; }
@@ -489,9 +490,9 @@ const Core = (() => {
     const rows = [['№', 'Вид', 'Номер', 'Дата', 'ДДС номер или ЕИК', 'Доставчик', 'Предмет', 'ДО с право на данъчен кредит', 'ДДС с право на данъчен кредит', 'ДО и ДДС без право на данъчен кредит', 'Данъчен кредит', 'Сметка']];
     let i = 0;
     for (const d of P.docs.filter(d => d.docType === 'invoice' || d.docType === 'credit_note').sort((a, b) => (a.date || '').localeCompare(b.date || ''))){
-      const none = d.vatMode === 'none';
+      const none = d.vatMode === 'none', sg = d.docType === 'credit_note' ? -1 : 1, n = v => v == null ? '' : num(sg * Math.abs(v), dec); /* кредитното известие намалява покупките */
       rows.push([++i, TYPES[d.docType], d.number, fd(d.date), d.supplierVat || d.supplierEik, d.supplier, d.subject || (d.lines && d.lines[0] ? d.lines[0].name : ''),
-        none ? '' : num(d.base, dec), none ? '' : num(d.vat, dec), none ? num(d.total, dec) : '', VATM[d.vatMode || 'full'], d.acc || '']);
+        none ? '' : n(d.base), none ? '' : n(d.vat), none ? n(d.total) : '', VATM[d.vatMode || 'full'], d.acc || '']);
     }
     return csv(rows);
   }
@@ -500,11 +501,13 @@ const Core = (() => {
   function exportPostings(P, dec){
     const rows = [['Дата', 'Вид документ', 'Номер', 'Контрагент', 'ЕИК', 'Основание', 'Дебит', 'Кредит', 'Сума']];
     for (const d of P.docs.filter(d => d.docType === 'invoice' || d.docType === 'credit_note').sort((a, b) => (a.date || '').localeCompare(b.date || ''))){
-      const head = [fd(d.date), TYPES[d.docType], d.number, d.supplier, d.supplierEik], what = d.subject || (d.lines && d.lines[0] ? d.lines[0].name : '') || 'Покупка', mode = d.vatMode || 'full';
-      if (mode === 'none' || !d.vat) rows.push(head.concat([what, d.acc || '', '401', num(d.total, dec)]));
-      else { rows.push(head.concat([what, d.acc || '', '401', num(d.base, dec)])); rows.push(head.concat(['ДДС по покупка' + (mode === 'partial' ? ' (частичен данъчен кредит)' : ''), '4531', '401', num(d.vat, dec)])); }
+      const head = [fd(d.date), TYPES[d.docType], d.number, d.supplier, d.supplierEik], cn = d.docType === 'credit_note', what = d.subject || (d.lines && d.lines[0] ? d.lines[0].name : '') || (cn ? 'Намаление по покупка' : 'Покупка'), mode = d.vatMode || 'full', n = v => v == null ? '' : num((cn ? -1 : 1) * Math.abs(v), dec);
+      /* Кредитното известие се сторнира: същите сметки с отрицателна сума. */
+      if (mode === 'none' || !d.vat) rows.push(head.concat([what, d.acc || '', '401', n(d.total)]));
+      else { rows.push(head.concat([what, d.acc || '', '401', n(d.base)])); rows.push(head.concat(['ДДС по покупка' + (mode === 'partial' ? ' (частичен данъчен кредит)' : ''), '4531', '401', n(d.vat)])); }
       const t = d.txId ? P.txs.find(t => t.id === d.txId) : null;
-      if (t) rows.push([fd(t.date), 'Банково плащане', d.number, d.supplier, d.supplierEik, 'Плащане по ' + TYPES[d.docType].toLowerCase() + ' ' + (d.number || ''), '401', '503', num(d.total != null ? d.total : Math.abs(t.amount), dec)]);
+      if (t && cn) rows.push([fd(t.date), 'Банково постъпление', d.number, d.supplier, d.supplierEik, 'Върната сума по кредитно известие ' + (d.number || ''), '503', '401', num(Math.abs(d.total != null ? d.total : t.amount), dec)]);
+      else if (t) rows.push([fd(t.date), 'Банково плащане', d.number, d.supplier, d.supplierEik, 'Плащане по ' + TYPES[d.docType].toLowerCase() + ' ' + (d.number || ''), '401', '503', num(d.total != null ? d.total : Math.abs(t.amount), dec)]);
     }
     return csv(rows);
   }
@@ -617,6 +620,7 @@ async function loadP(f, p){
 function fail(e){
   const code = e && e.code;
   S.toast = {cls: 'crit', text: code === 'quota_exceeded' ? 'Хранилището е пълно. Изтрийте стари периоди или фирми.' :
+    code === 'conflict' ? 'Колега е променил този месец междувременно. Заредена е неговата версия; повторете последната си промяна.' :
     code === 'invalid_argument' ? 'Записът беше отказан. Вероятно нямате права за редакция или документът е твърде голям.' :
     'Записът не успя (' + (code || 'грешка') + '). Проверете връзката и опитайте пак.'};
   softRender();

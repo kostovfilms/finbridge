@@ -70,7 +70,7 @@ input,select,textarea{border:1px solid var(--line);border-radius:8px;padding:8px
     <nav class="nav" id="nav" aria-label="Раздели"></nav>
     <div class="foot" id="foot"></div>
   </aside>
-  <main class="main" id="main" aria-live="polite"><p class="dim">Зареждане…</p></main>
+  <main class="main" id="main"><p class="dim">Зареждане…</p></main>
   <label class="snap off" id="snap"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Снимай документ<input type="file" accept="image/*" capture="environment" id="snap-file" aria-label="Снимай документ"></label>
 </div>
 <script>
@@ -267,8 +267,13 @@ const PILL = { submitted: 'warn', approved: 'info', rejected: 'crit', paid: 'goo
 async function load(){ S.st = await api('GET', '/api/fin/state'); if (role() === 'member' && S.view === 'dash') S.view = 'expense'; }
 async function act(fn, okText){
   if (S.busy) return; S.busy = true; S.msg = null;
-  try { await fn(); await load(); if (okText) S.msg = { cls: 'good', text: okText }; } catch (e) { S.msg = { cls: 'crit', text: e.message }; }
+  let keep = null;
+  try { await fn(); await load(); if (okText) S.msg = { cls: 'good', text: okText }; }
+  catch (e) { S.msg = { cls: 'crit', text: e.message };
+    /* При отказ въведеното във формите остава: стойностите се връщат след прерисуването. */
+    keep = [...document.querySelectorAll('#main form[id]')].map(f => [f.id, [...f.elements].filter(x => x.name && x.type !== 'file' && x.type !== 'password').map(x => [x.name, x.type === 'checkbox' ? x.checked : x.value])]); }
   S.busy = false; render();
+  for (const [id, vals] of keep || []){ const f = document.getElementById(id); if (!f) continue; for (const [n, v] of vals){ const x = f.elements[n]; if (!x || x instanceof RadioNodeList) continue; if (x.type === 'checkbox') x.checked = v; else x.value = v; } }
 }
 const items = t => S.st.items.filter(i => i.type === t);
 const period = () => S.st.today.slice(0, 7);
@@ -289,8 +294,8 @@ function rowActs(i){
   if (i.type === 'credit'){ if (i.status === 'open' && r !== 'member') h += b('refunded', 'Върнато на клиента', 'pri'); return '<div class="acts">' + h + '</div>'; }
   if (i.type === 'invoice'){
     if (i.inv && (i.status === 'open' || i.status === 'paid') && Fin.r2(i.amount - (i.credited || 0)) > 0.011) h += b('credit', 'Кредитно известие');
-    if (i.status === 'open') h += b('paid', i.paid > 0 ? 'Получен остатъкът' : 'Получено плащане', 'pri') + b('part', 'Частично плащане') + (Fin.dayDiff(S.st.today, i.due || i.date) > 0 ? b('dun', 'Копирай напомняне') : '') + b('void', 'Анулирай');
-    else h += b('reopen-inv', 'Върни като неплатена');
+    if (i.status === 'open') h += b('paid', i.paid > 0 ? 'Получен остатъкът' : 'Получено плащане', 'pri') + b('part', 'Частично плащане') + (Fin.dayDiff(S.st.today, i.due || i.date) > 0 ? b('dun', 'Копирай напомняне') : '') + (i.paid > 0 ? '' : b('void', S.confirm === 'void' + i.id ? 'Потвърди анулирането' : 'Анулирай', S.confirm === 'void' + i.id ? 'bad' : ''));
+    else if (i.status === 'paid') h += b('reopen-inv', 'Върни като неплатена');
   } else {
     if (i.status === 'submitted' && Fin.canApprove(i, S.st.me, S.st.settings).ok) h += b('approve', 'Одобри', 'pri') + b('reject', 'Откажи', 'bad');
     if (i.status === 'approved' && r !== 'member') h += b('paid', i.type === 'expense' ? (i.pay === 'own' ? 'Възстановено' : 'Приключи') : i.paid > 0 ? 'Платен остатъкът' : 'Платено', 'pri') + (i.type === 'bill' ? b('part', 'Частично плащане') : '');
@@ -470,7 +475,7 @@ function vTeam(){
     '<section class="card"><h2>Правила и наличност</h2><form class="form" id="set-form" novalidate><label>Наличност по сметките (' + S.st.cur + ')<input name="balance" inputmode="decimal" value="' + String(set.balance).replace('.', ',') + '"></label><label>Към дата<input name="balanceDate" type="date" value="' + esc(set.balanceDate || S.st.today) + '"></label>' +
     '<label>Лимит на одобряващия (0 = без лимит)<input name="approverLimit" inputmode="decimal" value="' + String(set.approverLimit).replace('.', ',') + '"></label><label>Документ се изисква над сума<input name="receiptOver" inputmode="decimal" value="' + String(set.receiptOver).replace('.', ',') + '"></label>' +
     '<label class="full">Категории, по една на ред<textarea name="cats" rows="6">' + esc(set.cats.join('\n')) + '</textarea></label>' +
-    '<h2 class="full" style="margin:8px 0 0">Данни на фирмата за фактурите</h2>' + [['s_eik', 'ЕИК', sl.eik || S.st.firm.eik], ['s_vatNo', 'ДДС номер (празно, ако няма регистрация)', sl.vatNo], ['s_mol', 'МОЛ', sl.mol], ['s_address', 'Адрес', sl.address], ['s_iban', 'IBAN', sl.iban], ['s_bank', 'Банка', sl.bank], ['s_bic', 'BIC', sl.bic]].map(x => '<label>' + x[1] + '<input name="' + x[0] + '" maxlength="200" value="' + esc(x[2] || '') + '"></label>').join('') +
+    '<h2 class="full" style="margin:8px 0 0">Данни на фирмата за фактурите</h2>' + [['s_name', 'Наименование по регистрация (излиза във фактурите)', sl.name || S.st.firm.name], ['s_eik', 'ЕИК', sl.eik || S.st.firm.eik], ['s_vatNo', 'ДДС номер (празно, ако няма регистрация)', sl.vatNo], ['s_mol', 'МОЛ', sl.mol], ['s_address', 'Адрес', sl.address], ['s_iban', 'IBAN', sl.iban], ['s_bank', 'Банка', sl.bank], ['s_bic', 'BIC', sl.bic]].map(x => '<label>' + x[1] + '<input name="' + x[0] + '" maxlength="200" value="' + esc(x[2] || '') + '"></label>').join('') +
     '<label>Номер на следващата фактура<input name="invNext" inputmode="numeric" value="' + (set.invNext || 1) + '"></label><div class="full acts"><button class="btn pri" type="submit">Запази правилата</button></div></form></section>';
 }
 function render(){
@@ -533,7 +538,7 @@ document.addEventListener('click', e => {
   const nav = e.target.closest('[data-view]'); if (nav){ e.preventDefault(); return go(nav.dataset.view); }
   const el = e.target.closest('[data-act]'); if (!el) return;
   const a = el.dataset.act, id = el.dataset.id, it = id && S.st.items.find(i => i.id === id);
-  if (a !== 'del' && a !== 'del-user' && a !== 'recur-del') S.confirm = null;
+  if (a !== 'del' && a !== 'void' && a !== 'del-user' && a !== 'recur-del') S.confirm = null;
   switch (a){
     case 'logout': e.preventDefault(); return api('POST', '/api/logout').then(() => { location.href = '/login'; });
     case 'new': S.form = { type: el.dataset.type, data: null }; S.reject = null; S.pay = null; S.issue = null; S.credit = null; if (S.view !== 'dash' || el.dataset.type !== 'expense') S.view = el.dataset.type; S.msg = null; return render();
@@ -560,7 +565,7 @@ document.addEventListener('click', e => {
     case 'approve': return act(() => status(id, 'approved'), 'Одобрено.' + (it.file && it.type === 'expense' ? ' Документът е изпратен на счетоводителя.' : ''));
     case 'reject': S.reject = id; S.form = null; S.pay = null; return render();
     case 'paid': return act(() => status(id, 'paid'), 'Отбелязано като платено.');
-    case 'void': return act(() => status(id, 'void'), 'Фактурата е анулирана.');
+    case 'void': if (S.confirm !== 'void' + id){ S.confirm = 'void' + id; S.msg = { cls: 'warn', text: 'Анулирането не може да се върне. Натиснете „Потвърди анулирането“, за да продължите.' }; return render(); } S.confirm = null; return act(() => status(id, 'void'), 'Фактурата е анулирана.');
     case 'bank-yes': return act(() => api('POST', '/api/fin/items/' + id + '/status', { status: 'paid', bank: el.dataset.bank }), 'Отбелязано като платено по банковото извлечение.');
     case 'bank-no': return act(() => api('POST', '/api/fin/items/' + id + '/skip', { bank: el.dataset.bank }));
     case 'dun': return copy(Fin.dunningText(it, S.st.firm.name, S.st.cur, S.st.today)).then(() => { S.msg = { cls: 'good', text: 'Текстът на напомнянето е копиран. Поставете го в имейл или съобщение до клиента.' }; render(); });
@@ -586,7 +591,7 @@ document.addEventListener('submit', e => {
   if (f.id === 'reject-form') return act(async () => { await status(f.dataset.id, 'rejected', v.note); S.reject = null; }, 'Заявката е отказана.');
   if (f.id === 'budget-form') return act(async () => { if (f.dataset.id) await api('PUT', '/api/fin/items/' + f.dataset.id, { data: v }); else await api('POST', '/api/fin/items', { type: 'budget', data: v }); S.form = null; }, 'Бюджетът е записан.');
   if (f.id === 'user-form') return act(async () => { await api('POST', '/api/fin/users', v); S.users = await api('GET', '/api/fin/users'); }, 'Достъпът е създаден. Предайте паролата на човека.');
-  if (f.id === 'set-form') return act(() => api('PUT', '/api/fin/settings', { data: Object.assign(v, { cats: v.cats.split('\n'), seller: { eik: v.s_eik, vatNo: v.s_vatNo, mol: v.s_mol, address: v.s_address, iban: v.s_iban, bank: v.s_bank, bic: v.s_bic } }) }), 'Правилата са записани.');
+  if (f.id === 'set-form') return act(() => api('PUT', '/api/fin/settings', { data: Object.assign(v, { cats: v.cats.split('\n'), seller: { name: v.s_name, eik: v.s_eik, vatNo: v.s_vatNo, mol: v.s_mol, address: v.s_address, iban: v.s_iban, bank: v.s_bank, bic: v.s_bic } }) }), 'Правилата са записани.');
   if (f.id === 'credit-form'){ collectCredit(); const d = S.credit; return act(async () => { const r = await api('POST', '/api/fin/invoices/' + d.id + '/credit', { data: d }); S.credit = null; S.print = r.credit.id; }, 'Кредитното известие е издадено.'); }
   if (f.id === 'issue-form' && S.issue && S.issue.recur){ collectIssue(); const d = S.issue; return act(async () => { await api(d.rid ? 'PUT' : 'POST', d.rid ? '/api/fin/recurring/' + d.rid : '/api/fin/recurring', { data: d }); S.issue = null; }, 'Шаблонът е записан.'); }
   if (f.id === 'issue-form'){ collectIssue(); return act(async () => { const it = await api('POST', '/api/fin/invoices', { data: S.issue }); S.issue = null; S.credit = null; S.print = it.id; }, 'Фактурата е издадена.'); }
@@ -607,7 +612,8 @@ document.addEventListener('input', e => {
   if (e.target.id === 'f-q'){ S.filter.q = e.target.value; const pos = e.target.selectionStart; render(); const n = $('f-q'); n.focus(); n.setSelectionRange(pos, pos); } });
 load().then(() => { const h = location.hash.slice(1); if (VIEWS.some(v => v[0] === h && v[2](role()))) return go(h); render(); }).catch(e => { $('main').innerHTML = '<div class="note crit">' + esc(e.message) + '</div>'; });
 addEventListener('hashchange', () => { const h = location.hash.slice(1); if (S.st && h !== S.view && VIEWS.some(v => v[0] === h && v[2](role()))) go(h); });
-setInterval(() => { if (!S.form && !S.reject && !S.pay && !S.issue && !S.credit && !S.print && !S.busy && S.view !== 'team' && document.activeElement.id !== 'f-q') load().then(render).catch(() => {}); }, 20000);
+setInterval(() => { if (!S.form && !S.reject && !S.pay && !S.issue && !S.credit && !S.print && !S.busy && S.view !== 'team' && document.activeElement.id !== 'f-q'){ const before = JSON.stringify(S.st), el = document.activeElement, sel = el && el !== document.body ? (el.id ? '#' + CSS.escape(el.id) : el.dataset && el.dataset.act ? '[data-act="' + el.dataset.act + '"]' + (el.dataset.id ? '[data-id="' + el.dataset.id + '"]' : '') : el.dataset && el.dataset.view ? '[data-view="' + el.dataset.view + '"]' : '') : '';
+    load().then(() => { if (JSON.stringify(S.st) === before) return; render(); const n = sel && document.querySelector(sel); if (n) n.focus({ preventScroll: true }); }).catch(() => {}); } }, 20000);
 })();
 </script>
 </body>

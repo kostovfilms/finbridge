@@ -55,7 +55,7 @@ const PW='parola-parola-1';
   ok('a fully credited invoice becomes "credited": closed, cannot be credited again, reopened or paid');
 
   /* известие по платена в брой: връщане в брой */
-  const i3=(await issue(own,{...base,date:'2026-11-17',pay:'cash',lines:[{name:'Стока',qty:2,price:50}]})).body;assert.equal(i3.status,'paid');
+  const i3=(await issue(own,{...base,pay:'cash',lines:[{name:'Стока',qty:2,price:50}]})).body;assert.equal(i3.status,'paid');
   r=await credit(own,i3.id,{reason:'Върната стока',lines:[{name:'Стока',qty:1,unit:'бр.',price:50}]});assert.deepEqual([r.body.credit.amount,r.body.credit.refund,r.body.credit.status,r.body.credit.pay],[60,60,'open','cash']);
 
   /* справки */

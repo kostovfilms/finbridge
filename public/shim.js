@@ -24,14 +24,19 @@
   const refresh = () => subs.forEach(f => f());
   const split = k => { const i = k.lastIndexOf('_'); return [k.slice(0, i), k.slice(i + 1)]; };
   const loadFirms = async () => snapList((await api('GET', '/api/firms')).map(f => { const id = f.id; const d = Object.assign({}, f); delete d.id; return snapDoc(id, d); }));
-  const loadPeriods = async per => snapList((await api('GET', '/api/periods?period=' + per)).map(x => snapDoc(x.firm + '_' + per, x.data)));
+  /* Версията на всеки зареден период се връща при запис: ако колега е записал междувременно, сървърът отказва и нищо не се губи мълчаливо. */
+  const ver = new Map();
+  const loadPeriods = async per => snapList((await api('GET', '/api/periods?period=' + per)).map(x => { const k = x.firm + '_' + per; ver.set(k, Math.max(ver.get(k) || 0, x.version || 0)); return snapDoc(k, x.data); }));
   function docRef(p){
     const [coll, id] = p.split('/');
     const url = coll === 'firms' ? '/api/firms/' + id : coll === 'settings' ? '/api/kv/' + id : '/api/period/' + split(id).join('/');
     return { id, path: p,
       async get(){ if (coll === 'firms') throw { code: 'invalid_argument' }; const r = await api('GET', url); return snapDoc(id, r.exists ? r.data : undefined); },
-      async set(data){ await api('PUT', url, { data }); refresh(); },
-      async delete(){ await api('DELETE', url); refresh(); } };
+      async set(data){
+        if (coll !== 'periods'){ await api('PUT', url, { data }); return refresh(); }
+        try { const r = await api('PUT', url, { data, version: ver.get(id) }); ver.set(id, r.version); } catch (e) { if (e.code === 'conflict') ver.delete(id); refresh(); throw e; }
+        refresh(); },
+      async delete(){ await api('DELETE', url); ver.delete(id); refresh(); } };
   }
   function query(coll, filter){
     const load = () => coll === 'firms' ? loadFirms() : filter && filter[0] === 'period' ? loadPeriods(filter[1]) : Promise.resolve(snapList([]));
