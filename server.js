@@ -41,6 +41,9 @@ db.exec('CREATE TABLE IF NOT EXISTS fin(id TEXT PRIMARY KEY, office_id TEXT NOT 
 db.exec('CREATE INDEX IF NOT EXISTS fin_firm ON fin(office_id, firm_id)');
 db.exec('CREATE TABLE IF NOT EXISTS finset(office_id TEXT NOT NULL, firm_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(office_id, firm_id))');
 db.exec('CREATE TABLE IF NOT EXISTS kv(office_id TEXT NOT NULL, key TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(office_id, key))');
+for (const sql of ["ALTER TABLE users ADD COLUMN totp TEXT NOT NULL DEFAULT ''", "ALTER TABLE users ADD COLUMN totp_pending TEXT NOT NULL DEFAULT ''", "ALTER TABLE users ADD COLUMN recovery TEXT NOT NULL DEFAULT '[]'", "ALTER TABLE users ADD COLUMN totp_step INTEGER NOT NULL DEFAULT 0"]){ try { db.exec(sql); } catch (e) { /* колоната вече съществува */ } }
+db.exec('CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, office_id TEXT NOT NULL, firm_id TEXT NOT NULL, user_id TEXT NOT NULL, email TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, detail TEXT NOT NULL, ip TEXT NOT NULL, at TEXT NOT NULL)');
+db.exec('CREATE INDEX IF NOT EXISTS audit_office ON audit(office_id, id)');
 const q = sql => db.prepare(sql);
 const now = () => new Date().toISOString();
 const rid = n => crypto.randomBytes(n).toString('base64url');
@@ -53,7 +56,7 @@ const SEC = { 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'R
 const CSP = "default-src 'self'; script-src 'self' 'nonce-{{NONCE}}'; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 function send(res, status, body, headers){
   const h = Object.assign({}, SEC, headers);
-  if (body != null && typeof body === 'object' && !Buffer.isBuffer(body)){ body = JSON.stringify(body); h['Content-Type'] = 'application/json; charset=utf-8'; h['Cache-Control'] = 'no-store'; }
+  if (body != null && typeof body === 'object' && !Buffer.isBuffer(body)){ res.fbOut = body; body = JSON.stringify(body); h['Content-Type'] = 'application/json; charset=utf-8'; h['Cache-Control'] = 'no-store'; }
   res.writeHead(status, h); res.end(body == null ? '' : body);
 }
 function readBody(req, limit){
@@ -66,7 +69,7 @@ function readBody(req, limit){
 }
 async function readJson(req, limit){
   const b = await readBody(req, limit || MAX_JSON);
-  try { const v = JSON.parse(b.toString('utf8') || '{}'); if (!v || typeof v !== 'object') throw 0; return v; } catch (e) { bad(400, 'bad_json', 'Невалидна заявка.'); }
+  try { const v = JSON.parse(b.toString('utf8') || '{}'); if (!v || typeof v !== 'object') throw 0; req.fbBody = v; return v; } catch (e) { bad(400, 'bad_json', 'Невалидна заявка.'); }
 }
 const safeDecode = v => { try { return decodeURIComponent(v); } catch (e) { return ''; } };
 const cookies = req => Object.fromEntries((req.headers.cookie || '').split(';').map(c => c.trim().split('=')).filter(c => c[0]).map(c => [c[0], safeDecode(c.slice(1).join('='))]));
@@ -78,13 +81,88 @@ const origin = req => BASE_URL || ((TRUST_PROXY && req.headers['x-forwarded-prot
 /* Връзки в имейли: само от BASE_URL или от локален адрес. Host заглавието идва от клиента и не бива да определя накъде сочи връзката за нова парола. */
 const mailOrigin = req => { if (BASE_URL || /^(localhost|127\.|\[::1\]|10\.|192\.168\.)/.test(String(req.headers.host || ''))) return origin(req); throw new HttpError(500, 'no_base_url', 'Не е зададен BASE_URL. Връзките в имейлите не могат да се изградят безопасно.'); };
 const hits = new Map();
+const REQUIRE_2FA = env.REQUIRE_2FA === 'true', AUDIT_DAYS = parseInt(env.AUDIT_DAYS, 10) || 400;
+
+/* ---------- журнал на действията ---------- */
+/* Записите само се добавят: няма маршрут за промяна или изтриване. Пазят се AUDIT_DAYS дни. */
+function logAct(req, u, action, detail, firm, target){
+  try {
+    const cut = (v, n) => String(v == null ? '' : v).replace(/[\u0000-\u001f]/g, ' ').slice(0, n);
+    q('INSERT INTO audit(office_id, firm_id, user_id, email, action, target, detail, ip, at) VALUES(?,?,?,?,?,?,?,?,?)').run(u.office_id, cut(firm != null ? firm : u.firm_id, 40), u.id, u.email, cut(action, 80), cut(target, 120), cut(detail, 200), cut(req ? ipOf(req) : '', 60), now());
+  } catch (e) { console.error(now(), 'журнал:', e.message); }
+}
+const ACTIONS = [
+  [/^POST \/api\/fin\/items$/, 'Нов запис', b => [b.type, b.data && b.data.party, b.data && b.data.amount].filter(Boolean).join(' · ')],
+  [/^PUT \/api\/fin\/items\/[^/]+$/, 'Променен запис', b => b.data && b.data.party],
+  [/^DELETE \/api\/fin\/items\/[^/]+$/, 'Изтрит запис'],
+  [/^POST \/api\/fin\/items\/[^/]+\/status$/, 'Смяна на статус', b => [b.status, b.note].filter(Boolean).join(' · ')],
+  [/^POST \/api\/fin\/items\/[^/]+\/pay$/, 'Отбелязано плащане', b => b.amount],
+  [/^POST \/api\/fin\/items\/[^/]+\/file$/, 'Качен документ'],
+  [/^POST \/api\/fin\/invoices$/, 'Издадена фактура', (b, o) => [o && o.number && '№ ' + o.number, b.data && b.data.party].filter(Boolean).join(' · ')],
+  [/^POST \/api\/fin\/invoices\/[^/]+\/credit$/, 'Кредитно известие', (b, o) => [o && o.number && '№ ' + o.number, b.data && b.data.reason].filter(Boolean).join(' · ')],
+  [/^(POST|PUT) \/api\/fin\/recurring(\/[^/]+)?$/, 'Повтаряща се фактура: запис', b => b.data && b.data.party],
+  [/^DELETE \/api\/fin\/recurring\/[^/]+$/, 'Повтаряща се фактура: изтрита'],
+  [/^POST \/api\/fin\/recurring\/[^/]+\/(issue|skip|pause)$/, 'Повтаряща се фактура: действие', (b, o, p) => p.split('/').pop()],
+  [/^PUT \/api\/fin\/settings$/, 'Променени правила и данни на фирмата'],
+  [/^POST \/api\/fin\/users$/, 'Добавен потребител', b => [b.email, b.role].filter(Boolean).join(' · ')],
+  [/^(PUT|DELETE) \/api\/fin\/users\/[^/]+$/, 'Променен или премахнат потребител', b => b.role],
+  [/^GET \/api\/fin\/export$/, 'Експорт', (b, o, p, url) => [url.searchParams.get('kind'), url.searchParams.get('period')].filter(Boolean).join(' · ')],
+  [/^GET \/api\/backup$/, 'Изтеглен архив на данните'],
+  [/^PUT \/api\/firms\/[^/]+$/, 'Фирма: запис', b => b.data && b.data.name],
+  [/^DELETE \/api\/firms\/[^/]+$/, 'Изтрита фирма'],
+  [/^POST \/api\/firms\/[^/]+\/portal-reset$/, 'Нова връзка за клиентския портал'],
+  [/^PUT \/api\/period\//, 'Запис на период', null, 600000],
+  [/^DELETE \/api\/period\//, 'Изтрит период'],
+  [/^PUT \/api\/kv\//, 'Променени настройки на кантората', null, 600000],
+  [/^POST \/api\/users$/, 'Добавен колега', b => b.email],
+  [/^DELETE \/api\/users\/[^/]+$/, 'Премахнат колега'],
+  [/^POST \/api\/password$/, 'Сменена парола'],
+  [/^POST \/api\/email$/, 'Изпратен имейл до клиент', b => b.subject],
+  [/^POST \/api\/files$/, 'Качен файл'],
+  [/^DELETE \/api\/files\/[^/]+$/, 'Изтрит файл'],
+  [/^POST \/api\/questions$/, 'Въпрос към клиент', b => b.text]
+];
+const lastLog = new Map();
+function autoLog(req, res){
+  const u = req.fbUser; if (!u || res.statusCode >= 400 || req.fbLogged) return;
+  const url = new URL(req.url, 'http://x'), p = url.pathname, key = req.method + ' ' + p, a = ACTIONS.find(x => x[0].test(key)); if (!a) return;
+  const firm = u.firm_id || url.searchParams.get('firm') || (/^\/api\/(?:firms|period)\/([A-Za-z0-9-]{1,40})/.exec(p) || [])[1] || '';
+  if (a[3]){ const k = u.id + key, t = Date.now(); if (lastLog.get(k) > t - a[3]) return; if (lastLog.size > 5000) lastLog.clear(); lastLog.set(k, t); }
+  let d = ''; try { d = a[2] ? a[2](req.fbBody || {}, res.fbOut, p, url) : ''; } catch (e) { /* подробността не е задължителна */ }
+  logAct(req, u, a[1], d, firm, p.replace(/^\/api\//, ''));
+}
+
+/* ---------- двуфакторен вход (TOTP, RFC 6238) ---------- */
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+const b32enc = buf => { let bits = '', out = ''; for (const x of buf) bits += x.toString(2).padStart(8, '0'); for (let i = 0; i < bits.length; i += 5) out += B32[parseInt(bits.slice(i, i + 5).padEnd(5, '0'), 2)]; return out; };
+const b32dec = str => { let bits = ''; for (const c of String(str).toUpperCase().replace(/[^A-Z2-7]/g, '')) bits += B32.indexOf(c).toString(2).padStart(5, '0'); const out = []; for (let i = 0; i + 8 <= bits.length; i += 8) out.push(parseInt(bits.slice(i, i + 8), 2)); return Buffer.from(out); };
+function totpAt(secret, step){
+  const c = Buffer.alloc(8); c.writeBigUInt64BE(BigInt(step));
+  const h = crypto.createHmac('sha1', b32dec(secret)).update(c).digest(), o = h[19] & 15;
+  return String(((h[o] & 127) << 24 | h[o + 1] << 16 | h[o + 2] << 8 | h[o + 3]) % 1e6).padStart(6, '0');
+}
+/* Приема кода за текущите 30 секунди и съседните (разлика в часовника). Връща стъпката или 0. Всеки код важи веднъж. */
+function totpStep(secret, code, after){
+  const t = Math.floor(Date.now() / 30000), c = Buffer.from(String(code));
+  for (const st of [t, t - 1, t + 1]){ const w = Buffer.from(totpAt(secret, st)); if (st > after && w.length === c.length && crypto.timingSafeEqual(w, c)) return st; }
+  return 0;
+}
+/* Код от приложението или еднократен резервен код. */
+function useCode(u, code){
+  code = String(code || '').replace(/\s/g, '');
+  if (/^\d{6}$/.test(code)){ const st = totpStep(u.totp, code, u.totp_step); if (!st) return ''; q('UPDATE users SET totp_step = ? WHERE id = ?').run(st, u.id); return 'totp'; }
+  const h = sha(code.toLowerCase().replace(/-/g, '')); let list; try { list = JSON.parse(u.recovery); } catch (e) { list = []; }
+  if (code.length < 8 || !list.includes(h)) return '';
+  q('UPDATE users SET recovery = ? WHERE id = ?').run(JSON.stringify(list.filter(x => x !== h)), u.id); return 'recovery';
+}
+const must2fa = u => REQUIRE_2FA && !u.totp && (!u.firm_id || u.crole === 'owner');
 function limit(key, max, windowMs){
   const t = Date.now(); let h = hits.get(key);
   if (!h && hits.size > 50000){ for (const [k, v] of hits) if (v.reset < t) hits.delete(k); if (hits.size > 50000) hits.delete(hits.keys().next().value); }
   if (!h || h.reset < t){ h = { n: 0, reset: t + windowMs }; hits.set(key, h); }
   if (++h.n > max) bad(429, 'rate_limited', 'Твърде много опити. Опитайте по-късно.');
 }
-setInterval(() => { const t = Date.now(); for (const [k, h] of hits) if (h.reset < t) hits.delete(k); q('DELETE FROM sessions WHERE expires < ?').run(t); }, 600000).unref();
+setInterval(() => { const t = Date.now(); for (const [k, h] of hits) if (h.reset < t) hits.delete(k); q('DELETE FROM sessions WHERE expires < ?').run(t); q('DELETE FROM audit WHERE at < ?').run(new Date(t - AUDIT_DAYS * 864e5).toISOString()); }, 600000).unref();
 
 const scrypt = (p, salt) => new Promise((ok, no) => crypto.scrypt(p, salt, 64, (e, k) => e ? no(e) : ok(k)));
 async function hashPass(p){ const salt = crypto.randomBytes(16); return salt.toString('hex') + ':' + (await scrypt(p, salt)).toString('hex'); }
@@ -102,7 +180,7 @@ function startSession(req, res, userId){
 }
 function auth(req){
   const t = cookies(req).fb_s; if (!t) return null;
-  const r = q('SELECT u.id, u.email, u.office_id, u.firm_id, u.crole, u.name, o.solo, o.name AS office FROM sessions s JOIN users u ON u.id = s.user_id JOIN offices o ON o.id = u.office_id WHERE s.token_hash = ? AND s.expires > ?').get(sha(t), Date.now());
+  const r = q('SELECT u.id, u.email, u.office_id, u.firm_id, u.crole, u.name, u.totp, o.solo, o.name AS office FROM sessions s JOIN users u ON u.id = s.user_id JOIN offices o ON o.id = u.office_id WHERE s.token_hash = ? AND s.expires > ?').get(sha(t), Date.now());
   return r || null;
 }
 const ID = /^[A-Za-z0-9-]{1,40}$/, PERIOD = /^\d{4}-(0[1-9]|1[0-2])$/, EMAIL = /^[^\s@<>"',;]+@[^\s@<>"',;]+\.[^\s@<>"',;]+$/;
@@ -730,7 +808,9 @@ async function handle(req, res){
     bad(405, 'method');
   }
 
-  const user = auth(req);
+  const user = auth(req); req.fbUser = user;
+  if (m === 'GET' && p === '/security') return user ? html(res, page('security.html')) : send(res, 302, '', { Location: '/login' });
+  if (m === 'GET' && (p === '/' || p === '/index.html' || p === '/company') && user && must2fa(user)) return send(res, 302, '', { Location: '/security' });
   if (m === 'GET' && (p === '/' || p === '/index.html')){
     if (!user) return send(res, 302, '', { Location: '/login' });
     if (user.firm_id) return html(res, page('company.html'));
@@ -756,13 +836,22 @@ async function handle(req, res){
     const fid = solo ? 'f' + crypto.randomBytes(6).toString('hex') : '';
     if (solo) q('INSERT INTO firms(office_id, id, data, portal_token) VALUES(?,?,?,?)').run(oid, fid, JSON.stringify({ name: office, eik: '', contact: '', channel: 'email', address: email, auto: false, stats: true }), rid(24));
     q('INSERT INTO users(id, office_id, email, pass, created, firm_id, crole) VALUES(?,?,?,?,?,?,?)').run(uid, oid, email, await hashPass(pass), now(), fid, solo ? 'owner' : '');
+    logAct(req, { id: uid, office_id: oid, firm_id: fid, email }, 'Регистрация', office);
     return send(res, 200, { ok: true }, { 'Set-Cookie': startSession(req, res, uid) });
   }
   if (p === '/api/login' && m === 'POST'){
     const b = await readJson(req), email = String(b.email || '').trim().toLowerCase();
     limit('login:' + ipOf(req) + ':' + email, 10, 900000); limit('loginacct:' + email, 30, 900000); limit('loginip:' + ipOf(req), 60, 900000);
-    const u = q('SELECT id, pass FROM users WHERE email = ?').get(email);
-    if (!(await checkPass(String(b.password || ''), u && u.pass)) || !u) bad(401, 'bad_login', 'Грешен имейл или парола.');
+    const u = q('SELECT id, pass, email, office_id, firm_id, totp, totp_step, recovery FROM users WHERE email = ?').get(email);
+    const failed = what => { const k = 'fail' + u.id, t = Date.now(); if (!(lastLog.get(k) > t - 60000)){ lastLog.set(k, t); logAct(req, u, 'Неуспешен вход', what); } };
+    if (!(await checkPass(String(b.password || ''), u && u.pass)) || !u){ if (u) failed('грешна парола'); bad(401, 'bad_login', 'Грешен имейл или парола.'); }
+    let how = '';
+    if (u.totp){
+      if (!String(b.code || '').trim()) bad(401, 'totp_required', 'Въведете кода от приложението за удостоверяване.');
+      limit('totp:' + u.id, 8, 900000);
+      how = useCode(u, b.code); if (!how){ failed('грешен код'); bad(401, 'bad_code', 'Кодът не е верен или вече е използван.'); }
+    }
+    logAct(req, u, 'Вход', how === 'recovery' ? 'с резервен код' : how ? 'с код от приложение' : '');
     return send(res, 200, { ok: true }, { 'Set-Cookie': startSession(req, res, u.id) });
   }
   if (p === '/api/forgot' && m === 'POST'){
@@ -784,6 +873,7 @@ async function handle(req, res){
     if (pass.length < 10 || pass.length > 200) bad(400, 'weak_password', 'Паролата трябва да е поне 10 знака.');
     q('UPDATE users SET pass = ? WHERE id = ?').run(await hashPass(pass), r.user_id);
     q('DELETE FROM sessions WHERE user_id = ?').run(r.user_id); q('DELETE FROM resets WHERE user_id = ?').run(r.user_id);
+    { const ru = q('SELECT id, email, office_id, firm_id FROM users WHERE id = ?').get(r.user_id); if (ru) logAct(req, ru, 'Нова парола чрез връзка от имейл'); }
     return send(res, 200, { ok: true });
   }
   if (!user) bad(401, 'unauthorized', 'Влезте в акаунта си.');
@@ -791,6 +881,40 @@ async function handle(req, res){
   if (p === '/api/logout' && m === 'POST'){
     q('DELETE FROM sessions WHERE token_hash = ?').run(sha(cookies(req).fb_s));
     return send(res, 200, { ok: true }, { 'Set-Cookie': 'fb_s=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0' });
+  }
+  if (p === '/api/2fa' && m === 'GET'){ const r = q('SELECT recovery FROM users WHERE id = ?').get(user.id); return send(res, 200, { enabled: !!user.totp, required: REQUIRE_2FA && (!user.firm_id || user.crole === 'owner'), recoveryLeft: JSON.parse(r.recovery || '[]').length, email: user.email, company: !!user.firm_id, log: !user.firm_id || user.crole === 'owner' }); }
+  if (p.startsWith('/api/2fa/') && m === 'POST'){
+    limit('2fa:' + user.id, 20, 900000);
+    const b = await readJson(req), row = q('SELECT pass, totp, totp_pending, totp_step, recovery FROM users WHERE id = ?').get(user.id), me2 = Object.assign({ id: user.id }, row);
+    if (p === '/api/2fa/setup'){
+      if (row.totp) bad(400, 'already', 'Двуфакторният вход вече е включен.');
+      if (!(await checkPass(String(b.password || ''), row.pass))) bad(400, 'bad_password', 'Паролата не е вярна.');
+      const secret = b32enc(crypto.randomBytes(20)); q('UPDATE users SET totp_pending = ? WHERE id = ?').run(secret, user.id);
+      return send(res, 200, { secret, uri: 'otpauth://totp/' + encodeURIComponent('FinBridge:' + user.email) + '?secret=' + secret + '&issuer=FinBridge&algorithm=SHA1&digits=6&period=30' });
+    }
+    if (p === '/api/2fa/enable'){
+      if (row.totp || !row.totp_pending) bad(400, 'no_setup', 'Започнете настройката отначало.');
+      const st = totpStep(row.totp_pending, String(b.code || '').replace(/\s/g, ''), 0); if (!st) bad(400, 'bad_code', 'Кодът не е верен. Проверете часовника на телефона.');
+      const codes = Array.from({ length: 8 }, () => crypto.randomBytes(5).toString('hex')).map(c => c.slice(0, 5) + '-' + c.slice(5));
+      q("UPDATE users SET totp = totp_pending, totp_pending = '', totp_step = ?, recovery = ? WHERE id = ?").run(st, JSON.stringify(codes.map(c => sha(c.replace(/-/g, '')))), user.id);
+      q('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(user.id, sha(cookies(req).fb_s));
+      logAct(req, user, 'Включен двуфакторен вход'); return send(res, 200, { recovery: codes });
+    }
+    if (p === '/api/2fa/disable'){
+      if (!row.totp) bad(400, 'not_enabled', 'Двуфакторният вход не е включен.');
+      if (!(await checkPass(String(b.password || ''), row.pass))) bad(400, 'bad_password', 'Паролата не е вярна.');
+      if (!useCode(me2, b.code)) bad(400, 'bad_code', 'Кодът не е верен или вече е използван.');
+      q("UPDATE users SET totp = '', totp_pending = '', totp_step = 0, recovery = '[]' WHERE id = ?").run(user.id);
+      logAct(req, user, 'Изключен двуфакторен вход'); return send(res, 200, { ok: true });
+    }
+    bad(404, 'not_found');
+  }
+  if (must2fa(user) && p !== '/api/me') bad(403, 'need_2fa', 'За този акаунт двуфакторният вход е задължителен. Включете го от „Сигурност".');
+  if (p === '/api/audit' && m === 'GET'){
+    if (user.firm_id && user.crole !== 'owner') bad(403, 'forbidden', 'Журналът е достъпен само за собственика.');
+    const before = parseInt(url.searchParams.get('before'), 10) || 9e15, w = user.firm_id ? ' AND firm_id = ?' : '', args = user.firm_id ? [O, before, user.firm_id] : [O, before];
+    const rows = q('SELECT id, at, email, action, detail, ip, firm_id AS firm FROM audit WHERE office_id = ? AND id < ?' + w + ' ORDER BY id DESC LIMIT 100').all(...args);
+    return send(res, 200, { rows, more: rows.length === 100 });
   }
   if (user.firm_id && !p.startsWith('/api/fin/') && p !== '/api/me' && p !== '/api/password') bad(403, 'forbidden', 'Нямате достъп до тази част.');
   if (p === '/api/me' && user.firm_id) return send(res, 200, { company: true, email: user.email, role: user.crole });
@@ -939,6 +1063,7 @@ async function handle(req, res){
 }
 
 const server = http.createServer((req, res) => {
+  res.on('finish', () => autoLog(req, res));
   if (isHttps(req)) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   handle(req, res).catch(e => {
     if (!(e instanceof HttpError)) console.error(now(), req.method, req.url, e);

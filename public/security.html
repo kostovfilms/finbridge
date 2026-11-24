@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="bg"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>FinBridge · Сигурност</title>
+<style>
+:root{--bg:#f1f4f5;--surface:#fff;--line:#d3dbdd;--ink:#16252a;--muted:#5b6d73;--accent:#0e6b74;--accent-ink:#fff;--crit:#b3261e;--good:#1d7a46;--soft:#e8edee}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#0f1719;--surface:#172124;--line:#2f4045;--ink:#e4ecee;--muted:#93a6ab;--accent:#4fc0c9;--accent-ink:#06262a;--crit:#ff8f87;--good:#6fd39a;--soft:#1f2c30}}
+*{box-sizing:border-box}[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;padding:24px 16px 64px}
+main{max-width:860px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+header{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+h1{font-size:24px;margin:0}h1 span{color:var(--accent)}h2{font-size:17px;margin:0 0 8px}
+a{color:var(--accent)}
+section{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:18px}
+label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted);max-width:340px}
+input{font:inherit;font-size:16px;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:9px 10px}
+button{font:inherit;font-weight:600;border:0;border-radius:8px;padding:10px 14px;background:var(--accent);color:var(--accent-ink);cursor:pointer}
+button.sec{background:var(--soft);color:var(--ink)}button.bad{background:none;color:var(--crit);border:1px solid var(--crit)}
+button:disabled{opacity:.6;cursor:default}
+form{display:flex;flex-direction:column;gap:12px;margin-top:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.pill{display:inline-block;font-size:12.5px;font-weight:600;border-radius:12px;padding:2px 10px;background:var(--soft)}.pill.on{color:var(--good)}.pill.off{color:var(--crit)}
+.err{color:var(--crit);min-height:1.4em;font-size:14px}.dim{color:var(--muted);font-size:13.5px}
+code,.key{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+.key{font-size:18px;letter-spacing:.06em;background:var(--soft);border-radius:8px;padding:10px 12px;word-break:break-all;user-select:all}
+.codes{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin:10px 0}
+.codes code{background:var(--soft);border-radius:6px;padding:6px 8px;text-align:center;font-size:15px}
+ol{margin:8px 0;padding-left:20px}
+.scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600;white-space:nowrap}
+td.t{white-space:nowrap;font-variant-numeric:tabular-nums}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style></head><body><main>
+<header><h1>Fin<span>Bridge</span> · Сигурност</h1><a href="/" id="back">← Към работата</a></header>
+<div class="err" id="top" role="alert"></div>
+
+<section aria-labelledby="h-2fa">
+  <h2 id="h-2fa">Двуфакторен вход <span class="pill" id="state">…</span></h2>
+  <p class="dim" id="lead">При вход освен паролата се иска и шестцифрен код от приложение на телефона (Google Authenticator, Microsoft Authenticator, Authy и подобни). Така откраднатата парола сама не стига.</p>
+
+  <div id="off" hidden>
+    <form id="f-setup" novalidate>
+      <label>Потвърдете с паролата си<input id="pw1" type="password" autocomplete="current-password"></label>
+      <div class="row"><button type="submit">Включи двуфакторния вход</button></div>
+      <div class="err" id="e-setup" role="alert"></div>
+    </form>
+  </div>
+
+  <div id="setup" hidden>
+    <ol>
+      <li>Отворете приложението за удостоверяване и изберете „Добавяне на акаунт“ → „Въвеждане на ключ“.</li>
+      <li>Въведете този ключ (тип: по време, 6 цифри):<div class="key" id="secret"></div>
+        <div class="row" style="margin-top:8px"><button class="sec" type="button" id="copy">Копирай ключа</button><a id="uri" href="#">Отвори в приложението на това устройство</a></div></li>
+      <li>Въведете кода, който приложението показва:</li>
+    </ol>
+    <form id="f-enable" novalidate>
+      <label>Шестцифрен код<input id="code1" inputmode="numeric" autocomplete="one-time-code" maxlength="7"></label>
+      <div class="row"><button type="submit">Потвърди и включи</button><button class="sec" type="button" id="cancel">Отказ</button></div>
+      <div class="err" id="e-enable" role="alert"></div>
+    </form>
+  </div>
+
+  <div id="codes" hidden>
+    <p><b>Двуфакторният вход е включен.</b> Запишете тези резервни кодове на сигурно място. Всеки важи веднъж и влиза вместо кода от приложението, ако изгубите телефона. Няма да ги видите отново.</p>
+    <div class="codes" id="list"></div>
+    <div class="row"><button class="sec" type="button" id="copy-codes">Копирай кодовете</button><button type="button" id="saved">Записах ги</button></div>
+  </div>
+
+  <div id="on" hidden>
+    <p class="dim" id="left"></p>
+    <form id="f-disable" novalidate>
+      <label>Парола<input id="pw2" type="password" autocomplete="current-password"></label>
+      <label>Код от приложението или резервен код<input id="code2" autocomplete="one-time-code" maxlength="20"></label>
+      <div class="row"><button class="bad" type="submit">Изключи двуфакторния вход</button></div>
+      <div class="err" id="e-disable" role="alert"></div>
+    </form>
+  </div>
+</section>
+
+<section aria-labelledby="h-log" id="log" hidden>
+  <h2 id="h-log">Журнал на действията</h2>
+  <p class="dim">Кой какво е направил и кога: влизания, фактури, плащания, одобрения, експорти, промени по екипа. Записите не могат да се променят или трият.</p>
+  <div class="scroll"><table><thead><tr><th>Кога</th><th>Кой</th><th>Действие</th><th>Подробност</th><th>Адрес</th></tr></thead><tbody id="rows"></tbody></table></div>
+  <div class="row" style="margin-top:12px"><button class="sec" type="button" id="more" hidden>По-стари записи</button></div>
+</section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+async function api(method, url, body){
+  let r; try { r = await fetch(url, { method, headers: { 'x-fb': '1', 'content-type': 'application/json' }, credentials: 'same-origin', body: body ? JSON.stringify(body) : undefined }); } catch (e) { throw new Error('Няма връзка със сървъра.'); }
+  if (r.status === 401){ location.href = '/login'; throw new Error('Сесията изтече.'); }
+  const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.message || 'Грешка ' + r.status); return j;
+}
+async function copy(text){ try { await navigator.clipboard.writeText(text); } catch (e) { const t = document.createElement('textarea'); t.value = text; document.body.appendChild(t); t.select(); document.execCommand('copy'); t.remove(); } }
+let st = null, codes = [], last = 0;
+function show(part){ for (const id of ['off', 'setup', 'codes', 'on']) $(id).hidden = id !== part; }
+async function refresh(){
+  st = await api('GET', '/api/2fa');
+  $('state').textContent = st.enabled ? 'включен' : 'изключен'; $('state').className = 'pill ' + (st.enabled ? 'on' : 'off');
+  $('top').textContent = st.required && !st.enabled ? 'За този акаунт двуфакторният вход е задължителен. Включете го, за да продължите.' : '';
+  $('back').hidden = st.required && !st.enabled;
+  $('left').textContent = 'Остават ' + st.recoveryLeft + ' резервни кода.' + (st.recoveryLeft < 3 ? ' За нови кодове изключете и включете отново двуфакторния вход.' : '');
+  show(st.enabled ? 'on' : 'off');
+  if (st.log){ $('log').hidden = false; $('rows').textContent = ''; last = 0; await loadLog(); }
+}
+const when = iso => { const d = new Date(iso); return d.toLocaleDateString('bg-BG', { day: '2-digit', month: '2-digit', year: 'numeric' }) + ' ' + d.toLocaleTimeString('bg-BG', { hour: '2-digit', minute: '2-digit' }); };
+async function loadLog(){
+  const r = await api('GET', '/api/audit' + (last ? '?before=' + last : ''));
+  for (const x of r.rows){
+    const tr = document.createElement('tr');
+    [[when(x.at), 't'], [x.email], [x.action], [x.detail], [x.ip, 't']].forEach(c => { const td = document.createElement('td'); td.textContent = c[0] || ''; if (c[1]) td.className = c[1]; tr.appendChild(td); });
+    $('rows').appendChild(tr); last = x.id;
+  }
+  if (!$('rows').children.length){ const tr = document.createElement('tr'), td = document.createElement('td'); td.colSpan = 5; td.textContent = 'Още няма записи.'; td.className = 'dim'; tr.appendChild(td); $('rows').appendChild(tr); }
+  $('more').hidden = !r.more;
+}
+const run = (form, err, fn) => { $(form).onsubmit = async e => { e.preventDefault(); $(err).textContent = ''; const b = $(form).querySelector('button[type=submit]'); b.disabled = true; try { await fn(); } catch (x) { $(err).textContent = x.message; } b.disabled = false; }; };
+run('f-setup', 'e-setup', async () => {
+  const r = await api('POST', '/api/2fa/setup', { password: $('pw1').value }); $('pw1').value = '';
+  $('secret').textContent = r.secret.replace(/(.{4})/g, '$1 ').trim(); $('secret').dataset.raw = r.secret; $('uri').href = r.uri; show('setup'); $('code1').focus();
+});
+run('f-enable', 'e-enable', async () => {
+  const r = await api('POST', '/api/2fa/enable', { code: $('code1').value }); $('code1').value = ''; codes = r.recovery;
+  $('list').textContent = ''; for (const c of codes){ const el = document.createElement('code'); el.textContent = c; $('list').appendChild(el); }
+  $('state').textContent = 'включен'; $('state').className = 'pill on'; $('top').textContent = ''; show('codes');
+});
+run('f-disable', 'e-disable', async () => { await api('POST', '/api/2fa/disable', { password: $('pw2').value, code: $('code2').value }); $('pw2').value = $('code2').value = ''; await refresh(); });
+$('copy').onclick = () => copy($('secret').dataset.raw);
+$('copy-codes').onclick = () => copy(codes.join('\n'));
+$('cancel').onclick = () => show('off');
+$('saved').onclick = () => { codes = []; $('list').textContent = ''; refresh().catch(e => { $('top').textContent = e.message; }); };
+$('more').onclick = () => loadLog().catch(e => { $('top').textContent = e.message; });
+refresh().catch(e => { $('top').textContent = e.message; });
+</script></body></html>

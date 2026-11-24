@@ -22,6 +22,12 @@ if (cmd === 'list'){
   const email = String(b || '').toLowerCase(); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) die('Невалиден имейл.'); if (user(email)) die('Този имейл вече е зает.');
   db.prepare('INSERT INTO users(id, office_id, email, pass, created) VALUES(?,?,?,?,?)').run(crypto.randomBytes(9).toString('base64url'), u.office_id, email, hash(c), new Date().toISOString());
   console.log(email + ' е добавен към кантората на ' + u.email + '.');
+} else if (cmd === 'reset-2fa'){
+  /* За изгубен телефон и изгубени резервни кодове. Колоните се появяват след първото пускане на новия сървър. */
+  const u = user(a) || die('Няма потребител с този имейл.');
+  db.prepare("UPDATE users SET totp = '', totp_pending = '', totp_step = 0, recovery = '[]' WHERE id = ?").run(u.id); db.prepare('DELETE FROM sessions WHERE user_id = ?').run(u.id);
+  db.prepare('INSERT INTO audit(office_id, firm_id, user_id, email, action, target, detail, ip, at) VALUES(?,?,?,?,?,?,?,?,?)').run(u.office_id, u.firm_id || '', u.id, u.email, 'Изключен двуфакторен вход', 'admin', 'от администратор през командния ред', '', new Date().toISOString());
+  console.log('Двуфакторният вход на ' + u.email + ' е изключен и сесиите са прекратени.');
 } else {
-  console.log('Команди:\n  node admin.js list\n  node admin.js set-password <имейл> <нова парола>\n  node admin.js add-user <имейл на колега от кантората> <нов имейл> <парола>');
+  console.log('Команди:\n  node admin.js list\n  node admin.js set-password <имейл> <нова парола>\n  node admin.js add-user <имейл на колега от кантората> <нов имейл> <парола>\n  node admin.js reset-2fa <имейл>');
 }
