@@ -50,7 +50,7 @@ const sha = s => crypto.createHash('sha256').update(s).digest('hex');
 class HttpError extends Error { constructor(status, code, message){ super(message || code); this.status = status; this.code = code; } }
 const bad = (status, code, message) => { throw new HttpError(status, code, message); };
 const SEC = { 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer', 'Permissions-Policy': 'camera=(self), microphone=(), geolocation=(), payment=()', 'Cross-Origin-Opener-Policy': 'same-origin' };
-const CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+const CSP = "default-src 'self'; script-src 'self' 'nonce-{{NONCE}}'; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; img-src 'self' data: blob:; worker-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 function send(res, status, body, headers){
   const h = Object.assign({}, SEC, headers);
   if (body != null && typeof body === 'object' && !Buffer.isBuffer(body)){ body = JSON.stringify(body); h['Content-Type'] = 'application/json; charset=utf-8'; h['Cache-Control'] = 'no-store'; }
@@ -213,8 +213,9 @@ async function askClaude(prompt, images){
 }
 
 /* ---------- pages ---------- */
-const page = f => fs.readFileSync(path.join(PUB, f), 'utf8');
-const html = (res, body, status) => send(res, status || 200, body, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': CSP, 'Cache-Control': 'no-store' });
+/* Вграденият скрипт на страницата получава еднократен nonce; всеки друг вграден скрипт се спира от CSP. */
+const page = f => fs.readFileSync(path.join(PUB, f), 'utf8').replace(/<script>/g, '<script nonce="{{NONCE}}">');
+const html = (res, body, status) => { const n = rid(16); return send(res, status || 200, String(body).split('{{NONCE}}').join(n), { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': CSP.replace('{{NONCE}}', n), 'Cache-Control': 'no-store' }) };
 const STATIC = { '/manifest.webmanifest': 'application/manifest+json', '/icon.svg': 'image/svg+xml', '/shim.js': 'text/javascript', '/vendor/pdf.min.js': 'text/javascript', '/vendor/pdf.worker.min.js': 'text/javascript' };
 const money = n => Math.abs(n).toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 function portalPage(firm){
@@ -733,7 +734,7 @@ async function handle(req, res){
   if (m === 'GET' && (p === '/' || p === '/index.html')){
     if (!user) return send(res, 302, '', { Location: '/login' });
     if (user.firm_id) return html(res, page('company.html'));
-    return html(res, page('index.html').replace('<script>\n/*CORE-START*/', '<script src="/shim.js"></script>\n<script>\n/*CORE-START*/'));
+    return html(res, page('index.html').replace('<script nonce="{{NONCE}}">\n/*CORE-START*/', '<script src="/shim.js"></script>\n<script nonce="{{NONCE}}">\n/*CORE-START*/'));
   }
   if (m === 'GET' && p === '/company') return user ? html(res, page('company.html')) : send(res, 302, '', { Location: '/login' });
   if (m === 'GET' && p === '/reset') return html(res, page('login.html').replace('{{SIGNUP}}', 'hidden'));

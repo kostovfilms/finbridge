@@ -4,9 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FinBridge</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
 <style>
 /* Layout idea: fixed left rail for the five work steps, one dense working surface on the right; state is carried by pills and a left stripe on rows. */
 :root{
@@ -16,9 +13,9 @@
   --good:#1d7a46; --good-soft:#dcf1e4;
   --warn:#9a5b00; --warn-soft:#fbecd0;
   --crit:#b3261e; --crit-soft:#fbe0de;
-  --font-display:"Manrope","Segoe UI",Arial,sans-serif;
-  --font-body:"Golos Text","Segoe UI",Arial,sans-serif;
-  --font-mono:"IBM Plex Mono",Consolas,monospace;
+  --font-display:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --font-body:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
