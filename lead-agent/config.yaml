@@ -1,0 +1,194 @@
+# Настройки на агента. Сменяйте ключовите думи и източниците тук, без код.
+
+# Пазари: всеки има език, държава, заявки за търсене и ниши с ключови думи.
+markets:
+  - id: bg
+    name: България
+    language: bg
+    country: България
+    # Какво се пише в полето за търсене на Facebook и LinkedIn
+    searchQueries:
+      - живо снимане
+      - рекламно видео
+      - снимачен екип
+      - фирмено видео
+      - музикален клип
+      - търся видеограф
+      - търся оператор
+      - кой снима клипове
+    # Ниши: ключова дума в текста определя нишата (сравнява се началото на думата).
+    # Редът има значение: първата ниша със съвпадение печели, затова общите са накрая.
+    niches:
+      Живо снимане: [живо снимане, заснемане на живо, излъчване на живо, стрийм, livestream]
+      Рекламно видео: [рекламно видео, реклама, рекламен клип, промо видео]
+      Фирмено видео: [фирмено видео, корпоративно видео, видео за фирма]
+      Музикален клип: [музикален клип, видеоклип, клип за песен, кой снима клипове]
+      Снимачен екип: [снимачен екип, видеограф, оператор, камераман, камерамен, снимач]
+      Видео (общо): [видео, клип, заснемане, снимане]
+  - id: us
+    name: USA
+    language: en
+    country: USA
+    searchQueries:
+      - 3D video
+      - 3D product animation
+      - CGI ad
+      - 3D commercial
+      - 3D explainer
+      - product render
+    niches:
+      3D Product Animation: [3d product animation, product animation, 3d animation, 3d animator]
+      CGI Ad: [cgi ad, cgi commercial, cgi video, cgi]
+      3D Commercial: [3d commercial, 3d ad, 3d video ad]
+      3D Explainer: [3d explainer, explainer video, explainer]
+      Product Render: [product render, 3d render, rendering, renders]
+      3D Video (общо): [3d video, 3d artist, 3d]
+
+# Фрази, които показват, че човек ТЪРСИ услугата
+seekerPhrases:
+  - търся
+  - търсим
+  - търси се
+  - нужен ми е
+  - нужна ми е
+  - нужно ми е
+  - нужен ни е
+  - нужна ни е
+  - трябва ми
+  - трябва ни
+  - кой може да
+  - кой снима
+  - някой да
+  - препоръчайте
+  - препоръка за
+  - препоръки за
+  - looking for
+  - need
+  - needed
+  - seeking
+  - hiring
+  - "[hiring]"
+  - who can
+  - recommend
+  - anyone know
+  - want someone
+
+# Фрази, които показват, че човек ПРЕДЛАГА услугата (тези публикации се махат)
+offerPhrases:
+  - предлагам
+  - предлагаме
+  - търся работа
+  - търся клиенти
+  - търся проекти
+  - свободни дати
+  - заповядайте
+  - нашите услуги
+  - моето портфолио
+  - цени от
+  - "[for hire]"
+  - for hire
+  - looking for work
+  - looking for clients
+  - looking for projects
+  - looking for new clients
+  - i offer
+  - we offer
+  - my portfolio
+  - available for
+  - dm me for
+  - check out my
+
+# Градове и щати за разпознаване на място. Ако няма съвпадение, се пише държавата.
+locations:
+  bg: [София, Пловдив, Варна, Бургас, Русе, Стара Загора, Плевен, Сливен, Добрич, Шумен, Перник, Хасково, Ямбол, Пазарджик, Благоевград, Велико Търново, Враца, Габрово, Асеновград, Видин, Казанлък, Кюстендил, Кърджали, Монтана, Димитровград, Ловеч, Силистра, Търговище, Дупница, Разград, Банско, Несебър, Созопол]
+  us: [New York, Los Angeles, Chicago, Houston, Phoenix, Philadelphia, San Antonio, San Diego, Dallas, Austin, San Francisco, Seattle, Denver, Boston, Miami, Atlanta, Las Vegas, Portland, Nashville, Detroit, California, Texas, Florida, Illinois, Washington, Colorado, Georgia, Arizona, Nevada, Oregon, Massachusetts, NYC, LA]
+
+# Източници
+sources:
+  facebook:
+    enabled: true
+    # Групи, в които СТЕ член. Агентът не влиза в нови групи.
+    groups:
+      # - https://www.facebook.com/groups/1234567890
+    # Търсене във Facebook по заявките от "searchQueries"
+    search: true
+  linkedin:
+    enabled: true
+  instagram:
+    enabled: true
+    hashtags: [видеограф, видеозаснемане, рекламнавидео, 3danimation, productanimation, cgi]
+    maxPostsPerTag: 9
+  upwork:
+    # Upwork спря публичните RSS през 2024 г. Сложете тук адреси на RSS, ако имате такива
+    # (напр. от услуга, която ги генерира). Без адреси източникът се пропуска.
+    enabled: true
+    feeds: []
+  forums:
+    enabled: true
+    # Публични RSS/Atom или HTML страници без вход.
+    # type: rss   -> чете <item>/<entry>
+    # type: html  -> трябват item/link/text селектори (CSS)
+    feeds:
+      - name: Reddit r/forhire
+        market: us
+        type: rss
+        url: https://www.reddit.com/r/forhire/search.rss?q=3D+OR+CGI+OR+animation&restrict_sr=1&sort=new
+      - name: Reddit r/hireanartist
+        market: us
+        type: rss
+        url: https://www.reddit.com/r/HungryArtists/search.rss?q=3D+animation&restrict_sr=1&sort=new
+      - name: Reddit r/bulgaria
+        market: bg
+        type: rss
+        url: https://www.reddit.com/r/bulgaria/search.rss?q=%D0%B2%D0%B8%D0%B4%D0%B5%D0%BE%D0%B3%D1%80%D0%B0%D1%84&restrict_sr=1&sort=new
+      # Пример за HTML страница (селекторите се настройват според сайта):
+      # - name: OLX България
+      #   market: bg
+      #   type: html
+      #   url: https://www.olx.bg/ads/q-видеограф/
+      #   itemSelector: "[data-cy=l-card]"
+      #   linkSelector: "a"
+      #   textSelector: "h4, h6"
+
+# Лимити (за поведение като човек)
+limits:
+  maxGroups: 30            # групи на пускане
+  maxPostsPerRun: 200      # публикации на пускане, общо
+  maxSearchesPerSource: 4  # колко заявки за търсене на източник на пускане (въртят се)
+  minDelaySec: 5
+  maxDelaySec: 20
+  scrollRounds: 6          # колко пъти скролва надолу на страница
+
+# График
+schedule:
+  everyHours: 6
+  workHours:
+    start: "09:00"
+    end: "21:00"
+
+# Браузър
+browser:
+  profileDir: ./browser-profile
+  headless: false          # видим прозорец намалява риска от блокиране
+  executablePath: ""       # празно = браузърът на Playwright (или CHROME_PATH от .env)
+
+# Класификация с Claude (нужен е ANTHROPIC_API_KEY в .env). Без ключ: по ключови думи.
+llm:
+  enabled: true
+  model: claude-opus-5-5
+  batchSize: 15
+
+# Лични данни (GDPR)
+privacy:
+  retentionDays: 90
+  # false = телефони и имейли в текста се заменят с [телефон]/[имейл]
+  keepContactsFromPost: false
+
+dedupe:
+  similarity: 0.8          # 0..1, над това два текста са дубликати
+
+notifications:
+  dailySummary: false      # true = известие на компютъра веднъж на ден
+
+output:
+  dir: ./output

@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Група</title></head><body>
+<div role="feed">
+  <div aria-posinset="1"><div role="article">
+    <h2><a role="link" href="https://www.facebook.com/user/1"><strong>Мария Петрова</strong></a></h2>
+    <a href="https://www.facebook.com/groups/111/posts/222/?__cft__[0]=zz&__tn__=R" aria-label="3 ч.">3 ч.</a>
+    <div data-ad-preview="message"><div dir="auto" id="m1">Здравейте! Търсим видеограф за фирмено видео в Пловдив. Бюджет до 1500 лв.<span class="more" hidden> Снимките са през декември, звънете 0888 123 456.</span></div>
+      <div role="button" id="see1">Виж още</div></div>
+    <div role="button">Харесвам</div><div role="button">Коментар</div>
+  </div></div>
+  <div aria-posinset="2"><div role="article">
+    <h2><a role="link" href="https://www.facebook.com/user/2"><strong>Студио Х</strong></a></h2>
+    <a href="https://www.facebook.com/groups/111/posts/333/" aria-label="1d">1d</a>
+    <div data-ad-preview="message"><div dir="auto">Предлагаме заснемане на рекламно видео, цени от 300 лв!</div></div>
+  </div></div>
+  <div aria-posinset="3"><div role="article">
+    <h2><a role="link" href="https://www.facebook.com/user/3"><strong>Иван</strong></a></h2>
+    <a href="https://www.facebook.com/groups/111/posts/444/" aria-label="Вчера в 18:00">Вчера</a>
+    <div data-ad-preview="message"><div dir="auto">Кой снима клипове в София? Трябва ми музикален клип за нова песен.</div></div>
+  </div></div>
+</div>
+<script>
+  // „Виж още“ разгъва текста; „Харесвам“ би било запис — тестът проверява, че не се натиска
+  window.__liked = false;
+  document.getElementById("see1").addEventListener("click", () => { document.querySelector(".more").hidden = false; document.getElementById("see1").remove(); });
+  for (const b of document.querySelectorAll('[role=button]')) if (b.textContent === "Харесвам") b.addEventListener("click", () => { window.__liked = true; });
+</script>
+</body></html>
