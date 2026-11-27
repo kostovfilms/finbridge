@@ -1,0 +1,25 @@
+:root { --bg:#f7f7f5; --fg:#1d1d1b; --muted:#6b6b66; --line:#e2e1dc; --card:#fff; --accent:#1f5fbf; --warn:#a15c00; --bad:#b3261e; }
+@media (prefers-color-scheme: dark) { :root { --bg:#17171a; --fg:#ececea; --muted:#a2a29c; --line:#2f2f34; --card:#1f1f23; --accent:#7fb0ff; --warn:#f0b04a; --bad:#ff8a80; } }
+* { box-sizing: border-box; }
+body { margin:0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--fg); padding: 16px; }
+header { display:flex; flex-wrap:wrap; align-items:baseline; gap:12px; justify-content:space-between; }
+h1 { font-size: 20px; margin: 0 0 8px; }
+.status { color: var(--muted); font-size: 13px; }
+.status .bad { color: var(--bad); font-weight: 600; }
+.status .warn { color: var(--warn); font-weight: 600; }
+.filters { display:flex; flex-wrap:wrap; gap:10px; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; margin: 8px 0; }
+.filters label { display:flex; flex-direction:column; font-size:12px; color:var(--muted); gap:4px; }
+.filters .grow { flex: 1 1 220px; }
+select, input, button { font: inherit; color: var(--fg); background: var(--bg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; min-height: 34px; }
+button { cursor:pointer; align-self:flex-end; }
+.bar { display:flex; justify-content:space-between; color:var(--muted); margin: 6px 2px; }
+a { color: var(--accent); }
+.table-wrap { overflow-x:auto; background:var(--card); border:1px solid var(--line); border-radius:8px; }
+table { border-collapse: collapse; width: 100%; min-width: 860px; }
+th, td { text-align:left; vertical-align:top; padding:8px 10px; border-bottom:1px solid var(--line); }
+th { font-size:12px; color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--card); }
+td.need { max-width: 460px; }
+td.nowrap { white-space: nowrap; }
+.open { display:inline-block; white-space:nowrap; background:var(--accent); color:#fff; text-decoration:none; padding:5px 10px; border-radius:6px; }
+@media (prefers-color-scheme: dark) { .open { color:#0b1b33; } }
+.empty { color: var(--muted); text-align:center; padding: 24px; }
