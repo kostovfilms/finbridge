@@ -9,3 +9,18 @@ jobs:
         with:
           node-version: 22
       - run: npm test
+  # Потоците в браузър. Playwright се слага отделно, само за проверката: проектът остава без зависимости.
+  # Chrome идва с образа ubuntu-latest в /usr/bin/google-chrome.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --prefix "$RUNNER_TEMP/pw" --no-save --no-audit --no-fund playwright@1.57.0
+      - run: google-chrome --version
+      - run: npm run test:e2e
+        env:
+          PLAYWRIGHT: ${{ runner.temp }}/pw/node_modules/playwright
+          CHROME: /usr/bin/google-chrome

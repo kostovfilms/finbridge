@@ -12,6 +12,8 @@ services:
     buildCommand: "true"
     startCommand: npm start
     healthCheckPath: /healthz
+    # Без автоматично качване при промяна в main: собственикът качва на ръка от таблото на Render.
+    autoDeployTrigger: 'off'
     envVars:
       - key: NODE_VERSION
         value: "22"
