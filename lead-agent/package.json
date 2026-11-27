@@ -1,0 +1,45 @@
+{
+  "name": "lead-agent",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Локален агент, който само чете и събира заявки за видео и 3D услуги",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "setup": "playwright install chromium",
+    "login": "tsx src/login.ts",
+    "start": "tsx src/run.ts",
+    "schedule": "tsx src/scheduler.ts",
+    "dashboard": "tsx dashboard/server.ts",
+    "check": "tsx src/check.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.14.0",
+    "cheerio": "^1.2.0",
+    "dotenv": "^18.0.10",
+    "exceljs": "^4.4.0",
+    "express": "^5.3.0",
+    "fast-xml-parser": "^5.12.1",
+    "node-cron": "^4.6.0",
+    "node-notifier": "^12.1.0",
+    "playwright": "^1.65.1",
+    "tsx": "^4.23.15",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.11",
+    "@types/node-notifier": "^8.0.5",
+    "eslint": "^10.16.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.74.0",
+    "vitest": "^5.1.2"
+  }
+}

@@ -43,6 +43,7 @@ node server.js      # PORT, DATA_DIR; виж README за останалите н
 - PR #5 (клон `hardening-2fa-audit-csp`, отворен): CSP с nonce, системни шрифтове, двуфакторен вход, журнал на действията, поправки на всички 29 находки от `REVIEW.md` (№16–29 на 27.11.2026, тестове в `test/review2.test.js` и `test/e2e-review2.js`).
 - 28.11.2026: CI пуска и `npm run test:e2e`; `autoDeployTrigger: 'off'` в двата файла за Render; пази го `test/config.test.js`. Първото пускане в GitHub не е видяно.
 - 28.11.2026: транзакции (`tx()`), QR код (`qr.js`) и `TOTP_KEY`, известия (`ALERT_EMAIL`, `ALERT_WEBHOOK`), роли в кантората и покани с връзка (`invites`). Тестове: `tx`, `totp-key`, `alerts`, `invites`.
+- 28.11.2026: `main` (PR #6 lead-agent и PR #7 от друга сесия: 2FA, журнал, CSP, фактура по имейл) е слят в клона. При дублиране остава версията на PR #5; от PR #7 са взети фактура по имейл, `POST /api/fin/refresh` и `lead-agent/`. Решенията са в `DECISIONS.md`.
 - Тестовете изключват `EMAIL_VERIFY` по подразбиране в `test/helpers.js`; тест, който проверява потвърждението, го включва изрично.
 - Не е изпитано с истински данни: Claude ключ, SMTP през TLS, реални банкови извлечения, живият сайт, истински телефон за 2FA.
 - Чака от собственика: платен хостинг с диск, образци от Delta Pro и Ажур, `ANTHROPIC_API_KEY`, SMTP доставчик.

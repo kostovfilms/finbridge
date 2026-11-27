@@ -127,6 +127,7 @@ const ACTIONS = [
   [/^POST \/api\/fin\/items\/[^/]+\/pay$/, 'Отбелязано плащане', b => b.amount],
   [/^POST \/api\/fin\/items\/[^/]+\/file$/, 'Качен документ'],
   [/^POST \/api\/fin\/invoices$/, 'Издадена фактура', (b, o) => [o && o.number && '№ ' + o.number, b.data && b.data.party].filter(Boolean).join(' · ')],
+  [/^POST \/api\/fin\/invoices\/[^/]+\/send$/, 'Изпратена фактура по имейл', b => b.to],
   [/^POST \/api\/fin\/invoices\/[^/]+\/credit$/, 'Кредитно известие', (b, o) => [o && o.number && '№ ' + o.number, b.data && b.data.reason].filter(Boolean).join(' · ')],
   [/^(POST|PUT) \/api\/fin\/recurring(\/[^/]+)?$/, 'Повтаряща се фактура: запис', b => b.data && b.data.party],
   [/^DELETE \/api\/fin\/recurring\/[^/]+$/, 'Повтаряща се фактура: изтрита'],
@@ -316,15 +317,25 @@ function missingFor(officeId, firmId, beforePeriod){
 }
 
 /* ---------- e-mail (SMTP) ---------- */
-function sendMail({ to, subject, text, replyTo }){
+function mimeBody(text, attachments){
+  const wrap = buf => buf.toString('base64').replace(/(.{76})/g, '$1\r\n');
+  if (!attachments || !attachments.length) return ['Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '', wrap(Buffer.from(text, 'utf8'))];
+  const bd = 'fb-' + rid(12), out = ['Content-Type: multipart/mixed; boundary="' + bd + '"', '', '--' + bd, 'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '', wrap(Buffer.from(text, 'utf8'))];
+  for (const a of attachments){
+    const name = "UTF-8''" + encodeURIComponent(a.name);
+    out.push('--' + bd, 'Content-Type: ' + a.mime + '; name*=' + name, 'Content-Disposition: attachment; filename*=' + name, 'Content-Transfer-Encoding: base64', '', wrap(Buffer.isBuffer(a.data) ? a.data : Buffer.from(String(a.data), 'utf8')));
+  }
+  out.push('--' + bd + '--');
+  return out;
+}
+function sendMail({ to, subject, text, replyTo, attachments }){
   return new Promise((ok, no) => {
     const sock = SMTP.secure ? tls.connect({ host: SMTP.host, port: SMTP.port, servername: SMTP.host }) : net.connect({ host: SMTP.host, port: SMTP.port });
     const b64 = s => Buffer.from(s, 'utf8').toString('base64');
     const hdr = s => '=?UTF-8?B?' + b64(String(s).replace(/[\r\n]+/g, ' ').slice(0, 200)) + '?=';
     const addr = (SMTP.from.match(/<([^>]+)>/) || [null, SMTP.from])[1];
     const msg = ['From: ' + SMTP.from, 'To: ' + to, 'Subject: ' + hdr(subject), replyTo ? 'Reply-To: ' + replyTo : null, 'Date: ' + new Date().toUTCString(),
-      'Message-ID: <' + rid(12) + '@' + (addr.split('@')[1] || 'finbridge') + '>', 'MIME-Version: 1.0', 'Content-Type: text/plain; charset=utf-8', 'Content-Transfer-Encoding: base64', '',
-      b64(text).replace(/(.{76})/g, '$1\r\n')].filter(x => x != null).join('\r\n');
+      'Message-ID: <' + rid(12) + '@' + (addr.split('@')[1] || 'finbridge') + '>', 'MIME-Version: 1.0'].concat(mimeBody(text, attachments)).filter(x => x != null).join('\r\n');
     const steps = [['EHLO finbridge', 250]];
     if (SMTP.user && !SMTP.secure && !/^(127\.|localhost$|::1$)/.test(SMTP.host)) return sock.destroy(), no(new HttpError(502, 'mail_insecure', 'Паролата за SMTP не се изпраща по нешифрована връзка. Ползвайте SMTP_SECURE=true.'));
     if (SMTP.user) steps.push(['AUTH LOGIN', 334], [b64(SMTP.user), 334], [b64(SMTP.pass), 235]);
@@ -506,7 +517,7 @@ const paidSum = d => r2((d.pays || []).reduce((s, p) => s + p.amount, 0));
 const creditSum = d => r2((d.credits || []).reduce((s, c) => s + c.amount, 0));
 /* Платено и кредитирано: толкова от сумата вече не се дължи. */
 const settled = d => r2(paidSum(d) + creditSum(d));
-const finOut = r => { const d = JSON.parse(r.data); return Object.assign({ paid: paidSum(d), credited: creditSum(d), credits: d.credits || [], pays: d.pays || [], id: r.id, type: r.type, status: r.status, owner: r.owner, by: d.by, created: r.created, updated: r.updated, file: d.file ? { name: d.file.name } : null, log: d.log || [], paidAt: d.paidAt || '', bankTx: d.bankTx || '', noAuto: !!d.noAuto, skip: d.skip || [] }, d.f); };
+const finOut = r => { const d = JSON.parse(r.data); return Object.assign({ paid: paidSum(d), credited: creditSum(d), credits: d.credits || [], pays: d.pays || [], id: r.id, mailTo: d.mailTo || '', type: r.type, status: r.status, owner: r.owner, by: d.by, created: r.created, updated: r.updated, file: d.file ? { name: d.file.name } : null, log: d.log || [], paidAt: d.paidAt || '', bankTx: d.bankTx || '', noAuto: !!d.noAuto, skip: d.skip || [] }, d.f); };
 const BANKKEY = /^\d{4}-\d{2}\/[A-Za-z0-9_-]{1,60}$/;
 function bankTxs(O, F){
   const out = [];
@@ -561,6 +572,24 @@ function invoiceClean(set, fd, b){
   const vatNote = rate ? '' : sv(b.vatNote, 120) || (seller.vatNo ? '' : 'чл. 113, ал. 9 от ЗДДС');
   if (!rate && !vatNote) bad(400, 'need_note', 'При ставка 0% посочете основанието за неначисляване на ДДС.');
   return { seller, party, buyer, lines, rate, t, vatNote, pay: b.pay === 'cash' ? 'cash' : 'bank', rev: Fin.REV[b.rev] ? String(b.rev) : '703', note: sv(b.note, 300) };
+}
+/* Фактура или кредитно известие като самостоятелен HTML документ за прикачване към имейл (отваря се в браузър и се печата като PDF). */
+function invoiceHtml(i, cur){
+  const v = i.inv, cr = i.type === 'credit', e = x => esc(String(x == null ? '' : x)), ng = x => cr ? '-' + x : x, mon = x => Fin.money(x) + ' ' + cur;
+  const dm = x => x ? String(x).split('-').reverse().join('.') : '', row = (k, x) => x ? k + ': ' + e(x) + '<br>' : '';
+  const who = (name, p) => '<b>' + e(name) + '</b><br>' + row('ЕИК', p.eik) + row('ДДС №', p.vatNo) + row('Адрес', p.address) + row('МОЛ', p.mol);
+  return '<!DOCTYPE html><html lang="bg"><head><meta charset="utf-8"><title>' + (cr ? 'Кредитно известие' : 'Фактура') + ' ' + e(i.number) + '</title><style>' +
+    'body{font:14px/1.45 Arial,sans-serif;color:#16252a;max-width:800px;margin:24px auto;padding:0 16px}h1{font-size:22px;margin:0 0 4px}.two{display:flex;gap:24px;flex-wrap:wrap;margin:16px 0}.two section{flex:1 1 280px}h2{font-size:13px;text-transform:uppercase;color:#5b6d73;margin:0 0 4px}' +
+    'table{border-collapse:collapse;width:100%;margin:12px 0}th,td{border-bottom:1px solid #d3dbdd;padding:6px;text-align:left}.num{text-align:right;white-space:nowrap}.sum{width:auto;margin-left:auto}.sum td{border:0}.sum tr:last-child td{font-weight:700;border-top:2px solid #16252a}.dim{color:#5b6d73}@media print{body{margin:0}}' +
+    '</style></head><body><h1>' + (cr ? 'КРЕДИТНО ИЗВЕСТИЕ' : 'ФАКТУРА') + ' № ' + e(i.number) + '</h1><div class="dim">Оригинал · Дата на издаване: ' + dm(i.date) + '</div>' +
+    '<div class="two"><section><h2>Получател</h2>' + who(i.party, v.buyer || {}) + '</section><section><h2>Доставчик</h2>' + who(v.seller.name, v.seller) + '</section></div>' +
+    '<table><thead><tr><th>№</th><th>Наименование</th><th>Мярка</th><th class="num">Количество</th><th class="num">Ед. цена</th><th class="num">Стойност</th></tr></thead><tbody>' +
+    v.lines.map((l, k) => '<tr><td>' + (k + 1) + '</td><td>' + e(l.name) + '</td><td>' + e(l.unit) + '</td><td class="num">' + ng(String(l.qty).replace('.', ',')) + '</td><td class="num">' + Fin.money(l.price) + '</td><td class="num">' + ng(Fin.money(l.sum)) + '</td></tr>').join('') + '</tbody></table>' +
+    '<table class="sum"><tbody><tr><td>Данъчна основа</td><td class="num">' + ng(mon(v.net)) + '</td></tr><tr><td>ДДС ' + e(v.rate) + '%</td><td class="num">' + ng(mon(v.vat)) + '</td></tr><tr><td>' + (cr ? 'Общо кредитирано' : 'Сума за плащане') + '</td><td class="num">' + ng(mon(i.amount)) + '</td></tr></tbody></table>' +
+    '<p>' + (cr && i.ref ? 'Към фактура № <b>' + e(i.ref.number) + '</b> от ' + dm(i.ref.date) + '<br>Основание: ' + e(i.ref.reason) + '<br>' : '') + (v.vatNote ? 'Основание за неначисляване на ДДС: ' + e(v.vatNote) + '<br>' : '') +
+    'Дата на данъчното събитие: ' + dm(i.date) + (i.due && !cr ? '<br>Падеж: ' + dm(i.due) : '') + '<br>Начин на плащане: ' + (i.pay === 'cash' ? 'в брой' : 'по банков път') +
+    (!cr && i.pay !== 'cash' && v.seller.iban ? '<br>IBAN: ' + e(v.seller.iban) + (v.seller.bank ? ', ' + e(v.seller.bank) : '') + (v.seller.bic ? ', BIC ' + e(v.seller.bic) : '') : '') + (i.note ? '<br>' + e(i.note) : '') + '</p>' +
+    '<p class="dim">Съставил: ' + e(i.by || '') + '</p></body></html>';
 }
 function issueInvoice(O, F, owner, who, b, extra){ return tx(() => issueInvoiceTx(O, F, owner, who, b, extra)); }
 function issueInvoiceTx(O, F, owner, who, b, extra){
@@ -628,6 +657,8 @@ async function finApi(req, res, url, user){
   const save = (r, d, status) => q('UPDATE fin SET data = ?, status = ?, updated = ? WHERE id = ?').run(JSON.stringify(d), status, now(), r.id);
   const getOut = id => finOut(q('SELECT * FROM fin WHERE id = ?').get(id));
   let a;
+  /* Засичане с банката и дължими повтарящи се фактури. GET /api/fin/state засега прави същото, за съвместимост. */
+  if (p === '/api/fin/refresh' && m === 'POST'){ finSync(O, F); recurRun(O, F); return send(res, 200, { ok: true }); }
   if (p === '/api/fin/state' && m === 'GET'){
     const sync = finSync(O, F); recurRun(O, F);
     let items = q('SELECT * FROM fin WHERE office_id = ? AND firm_id = ? ORDER BY created DESC').all(O, F).map(finOut);
@@ -637,7 +668,7 @@ async function finApi(req, res, url, user){
       out.bank = q('SELECT period, data FROM periods WHERE office_id = ? AND firm_id = ? ORDER BY period DESC LIMIT 6').all(O, F).map(r => { let d; try { d = JSON.parse(r.data); } catch (e) { d = {}; }
         const sum = sign => (d.txs || []).reduce((s, t) => s + (Math.sign(t.amount) === sign ? Math.abs(+t.amount || 0) : 0), 0); return { period: r.period, label: Core.periodLabel(r.period), out: Math.round(sum(-1) * 100) / 100, in: Math.round(sum(1) * 100) / 100 }; });
       out.suggest = sync.suggest;
-      out.missing = missingFor(O, F).filter(x => !x.replied).length; out.portal = origin(req) + '/u/' + firm.portal_token;
+      out.mail = !!(SMTP.host && SMTP.from); out.missing = missingFor(O, F).filter(x => !x.replied).length; out.portal = origin(req) + '/u/' + firm.portal_token;
     }
     return send(res, 200, out);
   }
@@ -811,6 +842,29 @@ async function finApi(req, res, url, user){
     if (role === 'member') deny();
     limit('fin:' + user.id, 300, 3600000);
     return send(res, 200, getOut(issueInvoice(O, F, user.id, who, (await readJson(req)).data || {})));
+  }
+  if ((a = /^\/api\/fin\/invoices\/([A-Za-z0-9_-]{8,40})\/send$/.exec(p)) && m === 'POST'){
+    /* Изпраща издадена фактура или кредитно известие на клиента: текст в писмото и документ за печат като прикачен файл. */
+    if (role === 'member') deny();
+    if (!(SMTP.host && SMTP.from)) bad(503, 'mail_disabled', 'Изпращането на имейли не е настроено на този сървър.');
+    if (!officeVerified(O)) bad(403, 'unverified', 'Първо потвърдете имейла си с връзката, която Ви изпратихме.');
+    const r = q('SELECT * FROM fin WHERE id = ? AND office_id = ? AND firm_id = ?').get(a[1], O, F);
+    if (!r || (r.type !== 'invoice' && r.type !== 'credit')) bad(404, 'not_found', 'Фактурата не е намерена.');
+    const d = JSON.parse(r.data);
+    if (!d.f.inv) bad(409, 'not_issued', 'Изпращат се само фактури, издадени от FinBridge.');
+    if (r.status === 'void') bad(409, 'bad_state', 'Анулирана фактура не се изпраща.');
+    const b = await readJson(req), to = String(b.to || '').trim().toLowerCase(), note = String(b.message || '').replace(/[\u0000-\u0008\u000b-\u001f]/g, ' ').slice(0, 2000);
+    if (!EMAIL.test(to) || to.length > 200) bad(400, 'bad_email', 'Въведете валиден имейл на получателя.');
+    if (!mailOk(O)) bad(429, 'rate_limited', 'Достигнат е лимитът за имейли за този час. Опитайте по-късно.');
+    const i = finOut(r), cr = r.type === 'credit', kind = cr ? 'Кредитно известие' : 'Фактура', cur = Core.cur(String(i.date).slice(0, 7));
+    const text = (note ? note + '\n\n' : 'Здравейте,\n\n') + kind + ' № ' + i.number + ' от ' + i.date.split('-').reverse().join('.') + ', издадена от ' + d.f.inv.seller.name + '.\n' +
+      (cr ? 'Кредитирана сума: ' : 'Сума за плащане: ') + i.amount.toFixed(2) + ' ' + cur + (i.due && !cr ? '\nПадеж: ' + i.due.split('-').reverse().join('.') : '') +
+      (!cr && i.pay !== 'cash' && d.f.inv.seller.iban ? '\nIBAN: ' + d.f.inv.seller.iban + (d.f.inv.seller.bank ? ', ' + d.f.inv.seller.bank : '') : '') +
+      '\n\nДокументът е прикачен (отваря се в браузър и се печата или записва като PDF).\n\n— Изпратено през FinBridge от ' + user.email;
+    await sendMail({ to, subject: kind + ' № ' + i.number + ' от ' + d.f.inv.seller.name, text, replyTo: user.email, attachments: [{ name: kind + '-' + i.number + '.html', mime: 'text/html; charset=utf-8', data: invoiceHtml(i, cur) }] });
+    d.mailTo = to; d.log.push({ at: now(), who, what: 'sent', note: to });
+    q('UPDATE fin SET data = ?, updated = ? WHERE id = ?').run(JSON.stringify(d), now(), r.id);
+    return send(res, 200, getOut(r.id));
   }
   if ((a = /^\/api\/fin\/invoices\/([A-Za-z0-9_-]{8,40})\/credit$/.exec(p)) && m === 'POST'){
     /* Кредитно известие към издадена фактура: същата поредица от номера, намалява дължимото по фактурата, без да я променя. */
