@@ -17,3 +17,8 @@ exports.invoiceReply=j=>{const t=j.messages[0].content.find(c=>c.type==='text').
   if(t.includes('Бетон Трейд'))return{text:'Ето данните: '+inv('Бетон Трейд ООД','507081376','1000000416','2026-10-09',1950,390,2340,{name:'Бетон B25',qty:15,unit:'м³',price:130,amount:1950})};
   if(t.includes('LIMIT'))return{status:429};if(t.includes('GARBAGE'))return{text:'не мога'};
   return{text:inv('Наем Техника ООД','925882778','1000000418','2026-10-19',750,150,900,{name:'Наем на багер',qty:5,unit:'дни',price:150,amount:750})}};
+/* Клиент с кутия за бисквитки и собствен IP (x-forwarded-for). */
+let ipn=0;exports.client=(port,o)=>{o=o||{};const http=require('node:http'),jar={},ip=o.ip||'10.8.'+(++ipn>>8)+'.'+(ipn&255);const f=(method,url,body,extra)=>new Promise((res,no)=>{const b=body==null?null:Buffer.isBuffer(body)?body:JSON.stringify(body);const cookie=Object.entries(jar).map(([k,v])=>k+'='+v).join('; ');
+  const r=http.request({host:'127.0.0.1',port,method,path:url,headers:{'x-fb':'1','x-forwarded-for':(extra&&extra.ip)||ip,'content-type':Buffer.isBuffer(body)?'application/octet-stream':'application/json',...(cookie?{cookie}:{}),...(b?{'content-length':Buffer.byteLength(b)}:{})}},x=>{let d='';x.on('data',c=>d+=c);x.on('end',()=>{for(const sc of x.headers['set-cookie']||[]){const [kv]=sc.split(';'),i=kv.indexOf('=');jar[kv.slice(0,i)]=kv.slice(i+1)}let j=null;try{j=JSON.parse(d)}catch(e){}res({status:x.statusCode,json:j,text:d})})});r.on('error',no);if(b)r.write(b);r.end()});f.jar=jar;return f};
+exports.mailText=m=>{const b=m.body.split('\n\n').slice(1).join('').replace(/\n/g,'');try{return Buffer.from(b,'base64').toString()}catch(e){return m.body}};
+exports.sleep=ms=>new Promise(r=>setTimeout(r,ms));

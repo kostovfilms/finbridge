@@ -51,6 +51,23 @@ const q = sql => db.prepare(sql);
 const now = () => new Date().toISOString();
 const rid = n => crypto.randomBytes(n).toString('base64url');
 const sha = s => crypto.createHash('sha256').update(s).digest('hex');
+/* Няколко записа като един: всичко или нищо. Вложено извикване става част от външното. Функцията е синхронна, без await вътре,
+   затова друга заявка не може да се вмъкне по средата. Файл на диска се маха едва след успешен запис, а нов файл се маха при отказ. */
+let txDepth = 0, txUndo = [], txAfter = [];
+function tx(fn){
+  if (txDepth) return fn();
+  db.exec('BEGIN IMMEDIATE'); txDepth = 1; txUndo = []; txAfter = [];
+  let r;
+  try { r = fn(); if (r && typeof r.then === 'function') throw new Error('tx: асинхронна функция'); db.exec('COMMIT'); }
+  catch (e) { try { db.exec('ROLLBACK'); } catch (x) { /* вече е върната */ } for (const f of txUndo) try { f(); } catch (x) { /* файлът вече липсва */ } throw e; }
+  finally { txDepth = 0; }
+  for (const f of txAfter.splice(0)) try { f(); } catch (e) { console.error(now(), 'след запис:', e.message); }
+  return r;
+}
+const rmFile = id => fs.rmSync(path.join(DATA, 'files', id), { force: true });
+const dropFile = id => { if (txDepth) txAfter.push(() => rmFile(id)); else rmFile(id); };
+/* Потребител и всичко, което сочи към него. */
+const dropUser = id => tx(() => { for (const t of ['sessions', 'resets', 'verifies']) q('DELETE FROM ' + t + ' WHERE user_id = ?').run(id); q('DELETE FROM users WHERE id = ?').run(id); });
 
 /* ---------- helpers ---------- */
 class HttpError extends Error { constructor(status, code, message){ super(message || code); this.status = status; this.code = code; } }
@@ -193,8 +210,8 @@ const deviceKey = u => sha('device:' + u.id + ':' + u.pass).slice(0, 40), LOGIN_
 const verifyOn = () => VERIFY_EMAIL && !!(SMTP.host && SMTP.from);
 function sendVerify(uid, email, link){
   const token = rid(32);
-  q('DELETE FROM verifies WHERE user_id = ? OR expires < ?').run(uid, Date.now());
-  q('INSERT INTO verifies(token_hash, user_id, expires) VALUES(?,?,?)').run(sha(token), uid, Date.now() + 7 * 864e5);
+  tx(() => { q('DELETE FROM verifies WHERE user_id = ? OR expires < ?').run(uid, Date.now());
+    q('INSERT INTO verifies(token_hash, user_id, expires) VALUES(?,?,?)').run(sha(token), uid, Date.now() + 7 * 864e5); });
   sendMail({ to: email, subject: 'Потвърдете имейла си във FinBridge', text: 'Здравейте!\nЗа да потвърдите, че този адрес е Ваш, отворете връзката до 7 дни:\n' + link + '/verify#' + token + '\nДокато адресът не е потвърден, FinBridge не изпраща писма до клиентите Ви.\nАко не сте създавали акаунт, не правете нищо.' })
     .catch(e => console.error(now(), 'имейл за потвърждение не беше изпратен:', e.message));
 }
@@ -222,7 +239,8 @@ const QUOTA = (parseFloat(env.OFFICE_QUOTA_MB) || 500) * 1048576;
 const PORTAL_QUOTA = (parseFloat(env.PORTAL_QUOTA_MB) || 100) * 1048576; /* необработени файлове от портала на една фирма */
 const KINDS = ['invoice', 'contract', 'statement', 'other'];
 const STMT = { csv: 'text/csv', txt: 'text/plain', sta: 'text/plain', mt940: 'text/plain', 940: 'text/plain', xml: 'application/xml', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', pdf: 'application/pdf' };
-function storeFile(officeId, firmId, name, buf, source, note, extra){
+function storeFile(officeId, firmId, name, buf, source, note, extra){ return tx(() => storeFileTx(officeId, firmId, name, buf, source, note, extra)); }
+function storeFileTx(officeId, firmId, name, buf, source, note, extra){
   extra = extra || {};
   if (!buf.length) bad(400, 'empty', 'Празен файл.');
   const used = q('SELECT COALESCE(SUM(size), 0) AS n FROM files WHERE office_id = ?').get(officeId).n + buf.length;
@@ -243,10 +261,10 @@ function storeFile(officeId, firmId, name, buf, source, note, extra){
     mime = want;
   } else if (!mime) bad(415, 'bad_type', 'Приемат се само снимки (JPG, PNG, WebP, GIF) и PDF.');
   const id = rid(12), clean = (v, n) => String(v || '').replace(/[\u0000-\u001f]/g, ' ').slice(0, n);
-  fs.writeFileSync(path.join(DATA, 'files', id), buf);
   q('INSERT INTO files(id, office_id, firm_id, name, mime, size, source, note, status, created, kind, tx_hint, period_hint) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)')
     .run(id, officeId, firmId, String(name || 'file').replace(/[\u0000-\u001f\\/]/g, '_').slice(0, 120), mime, buf.length, source, clean(note, 300), extra.status || (source === 'client' ? 'new' : 'done'), now(), kind,
       /^[A-Za-z0-9_-]{1,60}$/.test(extra.tx || '') ? extra.tx : '', PERIOD.test(extra.period || '') ? extra.period : '');
+  fs.writeFileSync(path.join(DATA, 'files', id), buf); txUndo.push(() => rmFile(id));
   return id;
 }
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
@@ -460,13 +478,13 @@ function finSync(O, F){
   const rows = q("SELECT * FROM fin WHERE office_id = ? AND firm_id = ? AND type != 'budget'").all(O, F), txs = rows.length ? bankTxs(O, F) : [];
   if (!txs.length) return { auto: [], suggest: [] };
   const res = Fin.matchBank(rows.map(finOut), txs, Core.nameSim);
-  for (const a of res.auto){
+  if (res.auto.length) tx(() => { for (const a of res.auto){
     const r = rows.find(x => x.id === a.id), d = JSON.parse(r.data);
     let status = 'paid';
     if (a.part){ if (cents(a.amount) > cents(d.f.amount) - cents(settled(d))) continue; if (!addPay(d, a.amount, a.date, a.key, 'Банково извлечение')) status = r.status; }
     else { d.bankTx = a.key; d.paidAt = a.date; d.log.push({ at: now(), who: 'Банково извлечение', what: 'paid', note: 'засечено автоматично' }); }
     q('UPDATE fin SET data = ?, status = ?, updated = ? WHERE id = ?').run(JSON.stringify(d), status, now(), r.id); r.data = JSON.stringify(d); r.status = status; hintFile(O, d, a.key);
-  }
+  } });
   return res;
 }
 function finSettings(O, F){ const r = q('SELECT data FROM finset WHERE office_id = ? AND firm_id = ?').get(O, F); return Object.assign({}, Fin.DEFAULTS, r ? JSON.parse(r.data) : {}); }
@@ -491,7 +509,8 @@ function invoiceClean(set, fd, b){
   if (!rate && !vatNote) bad(400, 'need_note', 'При ставка 0% посочете основанието за неначисляване на ДДС.');
   return { seller, party, buyer, lines, rate, t, vatNote, pay: b.pay === 'cash' ? 'cash' : 'bank', rev: Fin.REV[b.rev] ? String(b.rev) : '703', note: sv(b.note, 300) };
 }
-function issueInvoice(O, F, owner, who, b, extra){
+function issueInvoice(O, F, owner, who, b, extra){ return tx(() => issueInvoiceTx(O, F, owner, who, b, extra)); }
+function issueInvoiceTx(O, F, owner, who, b, extra){
   const firm = q('SELECT * FROM firms WHERE office_id = ? AND id = ?').get(O, F), set = finSettings(O, F), c = invoiceClean(set, JSON.parse(firm.data), b);
   if (b.date != null && b.date !== '' && !okDate(b.date)) bad(400, 'bad_date', 'Невалидна дата на фактурата.');
   const day = okDate(b.date) || sofiaDay();
@@ -520,16 +539,15 @@ const recurLabel = f => { const y = +f.next.slice(0, 4), mo = +f.next.slice(5, 7
 /* Издава фактура по шаблона (с днешна дата) и премества графика напред: всичко в една транзакция. */
 function recurIssue(O, F, r, d, who){
   const f = d.f, today = sofiaDay(), at = now();
-  db.exec('BEGIN');
-  try {
+  return tx(() => {
     const id = issueInvoice(O, F, r.owner, who, Object.assign({}, f, { date: today, due: f.pay === 'cash' ? '' : Fin.addDays(today, f.dueDays), note: (f.note ? f.note + '. ' : '') + 'Период: ' + recurLabel(f) }), { note: 'повтаряща се фактура' });
     const no = JSON.parse(q('SELECT data FROM fin WHERE id = ?').get(id).data).f.number;
     f.count = (f.count || 0) + 1; f.lastNumber = no; f.lastDate = today; delete f.error; f.next = Fin.addMonths(f.next, RECUR_FREQ[f.freq], f.day);
     d.log.push({ at, who, what: 'issued', note: no });
     const status = f.end && f.next > f.end ? 'done' : r.status;
     q('UPDATE fin SET data = ?, status = ?, updated = ? WHERE id = ?').run(JSON.stringify(d), status, at, r.id); r.status = status;
-    db.exec('COMMIT'); return id;
-  } catch (e) { db.exec('ROLLBACK'); throw e; }
+    return id;
+  });
 }
 /* Автоматичните шаблони издават сами; останалите само излизат като „чакат издаване“ в таблото. */
 function recurRun(O, F){
@@ -616,8 +634,9 @@ async function finApi(req, res, url, user){
     if (!a[2] && m === 'DELETE'){
       issuedLock();
       if (!canEdit && !(role === 'owner' && r.type === 'budget')) deny();
-      const f = fileRow(); if (f && f.status === 'held'){ fs.rmSync(path.join(DATA, 'files', f.id), { force: true }); q('DELETE FROM files WHERE id = ?').run(f.id); }
-      q('DELETE FROM fin WHERE id = ?').run(r.id); return send(res, 200, { ok: true });
+      const f = fileRow();
+      tx(() => { if (f && f.status === 'held'){ q('DELETE FROM files WHERE id = ?').run(f.id); dropFile(f.id); } q('DELETE FROM fin WHERE id = ?').run(r.id); });
+      return send(res, 200, { ok: true });
     }
     if (a[2] === '/file' && m === 'GET'){
       const f = fileRow(); if (!f) bad(404, 'not_found');
@@ -630,9 +649,12 @@ async function finApi(req, res, url, user){
       /* Разход отива при счетоводителя след одобрение; фактурите от доставчици и към клиенти веднага. */
       const status = r.type === 'expense' && r.status !== 'approved' ? 'held' : 'new';
       const label = { expense: 'Разход', bill: 'Фактура от доставчик', invoice: 'Издадена фактура' }[r.type] + ': ' + d.f.party + ', ' + d.f.amount.toFixed(2);
-      const id = storeFile(O, F, url.searchParams.get('name'), buf, 'company', label, { status, period: d.f.date.slice(0, 7) });
-      if (old && old.status === 'held'){ fs.rmSync(path.join(DATA, 'files', old.id), { force: true }); q('DELETE FROM files WHERE id = ?').run(old.id); }
-      d.file = { id, name: q('SELECT name FROM files WHERE id = ?').get(id).name }; save(r, d, r.status); return send(res, 200, getOut(r.id));
+      tx(() => {
+        const id = storeFile(O, F, url.searchParams.get('name'), buf, 'company', label, { status, period: d.f.date.slice(0, 7) });
+        if (old && old.status === 'held'){ q('DELETE FROM files WHERE id = ?').run(old.id); dropFile(old.id); }
+        d.file = { id, name: q('SELECT name FROM files WHERE id = ?').get(id).name }; save(r, d, r.status);
+      });
+      return send(res, 200, getOut(r.id));
     }
     if (a[2] === '/pay' && m === 'POST'){
       if (role === 'member') deny();
@@ -640,15 +662,15 @@ async function finApi(req, res, url, user){
       const b = await readJson(req), rem = r2(d.f.amount - settled(d));
       let amount = r2(+String(b.amount).replace(',', '.') || 0), date = /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') && !isNaN(Date.parse(b.date)) ? b.date : sofiaDay(), key = '';
       if (b.bank != null){
-        const tx = BANKKEY.test(String(b.bank)) && bankTxs(O, F).find(t => t.key === b.bank);
-        if (!tx || Math.sign(tx.amount) !== (r.type === 'invoice' ? 1 : -1)) bad(409, 'no_tx', 'Това банково плащане не отговаря на записа.');
-        if (bankUsed(O, F, tx.key)) bad(409, 'bank_used', 'Това банково плащане вече е отнесено към друг запис.');
-        amount = r2(Math.abs(tx.amount)); date = tx.date; key = tx.key;
+        const bt = BANKKEY.test(String(b.bank)) && bankTxs(O, F).find(t => t.key === b.bank);
+        if (!bt || Math.sign(bt.amount) !== (r.type === 'invoice' ? 1 : -1)) bad(409, 'no_tx', 'Това банково плащане не отговаря на записа.');
+        if (bankUsed(O, F, bt.key)) bad(409, 'bank_used', 'Това банково плащане вече е отнесено към друг запис.');
+        amount = r2(Math.abs(bt.amount)); date = bt.date; key = bt.key;
       }
       if (!(amount > 0)) bad(400, 'bad_data', 'Въведете платената сума.');
       if (cents(amount) > cents(rem)) bad(400, 'too_much', 'Сумата надвишава остатъка от ' + rem.toFixed(2) + '.');
-      const done = addPay(d, amount, date, key, who); if (key) hintFile(O, d, key);
-      save(r, d, done ? 'paid' : r.status); return send(res, 200, getOut(r.id));
+      const done = addPay(d, amount, date, key, who);
+      tx(() => { if (key) hintFile(O, d, key); save(r, d, done ? 'paid' : r.status); }); return send(res, 200, getOut(r.id));
     }
     if (a[2] === '/skip' && m === 'POST'){
       if (role === 'member' || r.type === 'budget') deny();
@@ -657,14 +679,14 @@ async function finApi(req, res, url, user){
     }
     if (a[2] === '/status' && m === 'POST'){
       const b = await readJson(req), to = String(b.status || ''), from = r.status, item = finOut(r);
-      let ok = false, tx = null, note = String(b.note || '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 300);
+      let ok = false, bankTx = null, note = String(b.note || '').replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 300);
       if (r.type === 'credit' && b.bank != null) bad(400, 'bad_state', 'Връщането към клиента се отбелязва без банково плащане.');
       if (b.bank != null && to === 'paid'){
         /* Потвърждение по конкретно банково плащане: то трябва да съществува, да е със същата сума и да не е вързано другаде. */
         if (role === 'member' || r.type === 'budget') deny();
-        tx = BANKKEY.test(String(b.bank)) && bankTxs(O, F).find(t => t.key === b.bank);
-        if (!tx || Math.sign(tx.amount) !== (r.type === 'invoice' ? 1 : -1) || cents(Math.abs(tx.amount)) !== cents(d.f.amount) - cents(settled(d))) bad(409, 'no_tx', 'Това банково плащане не отговаря на записа.');
-        if (bankUsed(O, F, tx.key)) bad(409, 'bank_used', 'Това банково плащане вече е отнесено към друг запис.');
+        bankTx = BANKKEY.test(String(b.bank)) && bankTxs(O, F).find(t => t.key === b.bank);
+        if (!bankTx || Math.sign(bankTx.amount) !== (r.type === 'invoice' ? 1 : -1) || cents(Math.abs(bankTx.amount)) !== cents(d.f.amount) - cents(settled(d))) bad(409, 'no_tx', 'Това банково плащане не отговаря на записа.');
+        if (bankUsed(O, F, bankTx.key)) bad(409, 'bank_used', 'Това банково плащане вече е отнесено към друг запис.');
         note = 'потвърдено по банково плащане';
       }
       if (r.type === 'credit'){ if (role === 'member') deny(); ok = (from === 'open' && to === 'paid') || (from === 'paid' && to === 'open'); }
@@ -675,12 +697,12 @@ async function finApi(req, res, url, user){
           const c = Fin.canApprove(item, me, set); if (!c.ok) bad(403, 'forbidden', c.why);
           if (to === 'rejected' && note.length < 2) bad(400, 'need_reason', 'Напишете причина за отказа.');
           ok = from === 'submitted';
-        } else if (to === 'paid'){ if (role === 'member') deny(); ok = from === 'approved' || (!!tx && r.type === 'bill' && from === 'submitted' && Fin.canApprove(item, me, set).ok); }
+        } else if (to === 'paid'){ if (role === 'member') deny(); ok = from === 'approved' || (!!bankTx && r.type === 'bill' && from === 'submitted' && Fin.canApprove(item, me, set).ok); }
         else if (to === 'submitted') ok = from !== 'submitted' && (role === 'owner' || (from === 'rejected' && mine));
       }
       if (!ok) bad(409, 'bad_state', 'Това действие не е възможно в текущото състояние.');
       d.log.push({ at: now(), who, what: to, note }); if (d.log.length > 50) d.log.splice(1, d.log.length - 50);
-      d.paidAt = to === 'paid' ? (tx ? tx.date : /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : sofiaDay()) : '';
+      d.paidAt = to === 'paid' ? (bankTx ? bankTx.date : /^\d{4}-\d{2}-\d{2}$/.test(b.date || '') ? b.date : sofiaDay()) : '';
       /* Върнат запис, който е бил засечен с банката, не се затваря повторно сам и не се предлага за същото плащане. */
       if (from === 'paid'){
         const keys = [d.bankTx].concat((d.pays || []).map(p => p.bank)).filter(Boolean);
@@ -688,7 +710,7 @@ async function finApi(req, res, url, user){
         /* Вноските остават. Ако те покриват цялата сума, се маха само последната. */
         if ((d.pays || []).length && cents(d.f.amount) <= cents(settled(d))) d.pays.pop();
       }
-      if (tx){ d.bankTx = tx.key; hintFile(O, d, tx.key); } else delete d.bankTx;
+      if (!bankTx) delete d.bankTx; else d.bankTx = bankTx.key;
       /* №21: фактура, върната в „неплатена“, преизчислява връщанията по кредитните си известия спрямо реално платеното. */
       let creditRows = [];
       if (r.type === 'invoice' && from === 'paid' && (d.credits || []).some(c => c.refund > 0)){
@@ -697,17 +719,14 @@ async function finApi(req, res, url, user){
         let need = Math.max(0, r2(paidSum(d) - (d.f.amount - creditSum(d))));
         d.credits.forEach(c => { const v = Math.min(c.refund || 0, need); need = r2(need - v); c.refund = r2(v); });
       }
-      if (to === 'approved' && d.file) q("UPDATE files SET status = 'new' WHERE id = ? AND office_id = ? AND status = 'held'").run(d.file.id, O);
-      if (creditRows.length){
-        db.exec('BEGIN');
-        try {
-          save(r, d, to);
-          for (const cr of creditRows){ const cd = JSON.parse(cr.data), c = d.credits.find(x => x.id === cr.id), v = c ? c.refund : 0;
-            if (cd.f.refund === v) continue; cd.f.refund = v; cd.log.push({ at: now(), who, what: 'refund', note: 'преизчислено след връщане на фактурата: ' + v.toFixed(2) });
-            save(cr, cd, v > 0 ? 'open' : 'issued'); }
-          db.exec('COMMIT');
-        } catch (e) { db.exec('ROLLBACK'); throw e; }
-      } else save(r, d, to);
+      tx(() => {
+        if (bankTx) hintFile(O, d, bankTx.key);
+        if (to === 'approved' && d.file) q("UPDATE files SET status = 'new' WHERE id = ? AND office_id = ? AND status = 'held'").run(d.file.id, O);
+        save(r, d, to);
+        for (const cr of creditRows){ const cd = JSON.parse(cr.data), c = d.credits.find(x => x.id === cr.id), v = c ? c.refund : 0;
+          if (cd.f.refund === v) continue; cd.f.refund = v; cd.log.push({ at: now(), who, what: 'refund', note: 'преизчислено след връщане на фактурата: ' + v.toFixed(2) });
+          save(cr, cd, v > 0 ? 'open' : 'issued'); }
+      });
       const u = !mine && (to === 'approved' || to === 'rejected') && SMTP.host && SMTP.from && q('SELECT email FROM users WHERE id = ?').get(r.owner);
       if (u) sendMail({ to: u.email, subject: (to === 'approved' ? 'Одобрен' : 'Отказан') + ' разход: ' + d.f.party, text: 'Здравейте!\nЗаявката ви за ' + d.f.amount.toFixed(2) + ' към ' + d.f.party + ' от ' + d.f.date + ' е ' + (to === 'approved' ? 'одобрена.' : 'отказана. Причина: ' + note) + '\n' + mailOrigin(req) })
         .catch(e => console.error(now(), 'имейл за решение не беше изпратен:', e.message));
@@ -767,13 +786,11 @@ async function finApi(req, res, url, user){
     d.credits = (d.credits || []).concat({ id, number: f.number, date: day, amount: t.total, refund }); d.log.push({ at, who, what: 'credit', note: f.number + ': ' + t.total.toFixed(2) });
     let status = r.status;
     if (status === 'open' && cents(d.f.amount) <= cents(settled(d))){ if (paidSum(d) > 0){ status = 'paid'; d.paidAt = day; d.log.push({ at, who, what: 'paid', note: 'уредена с кредитно известие' }); } else status = 'credited'; }
-    db.exec('BEGIN');
-    try {
+    tx(() => {
       q('INSERT INTO fin(id, office_id, firm_id, type, status, owner, data, created, updated) VALUES(?,?,?,?,?,?,?,?,?)').run(id, O, F, 'credit', refund > 0 ? 'open' : 'issued', user.id, JSON.stringify({ f, by: who, log: [{ at, who, what: 'issued' }] }), at, at);
       q('UPDATE fin SET data = ?, status = ?, updated = ? WHERE id = ?').run(JSON.stringify(d), status, at, r.id);
       q('INSERT INTO finset(office_id, firm_id, data) VALUES(?,?,?) ON CONFLICT(office_id, firm_id) DO UPDATE SET data = excluded.data').run(O, F, JSON.stringify(Object.assign({}, set, { invNext: n + 1 })));
-      db.exec('COMMIT');
-    } catch (e) { db.exec('ROLLBACK'); throw e; }
+    });
     return send(res, 200, { credit: getOut(id), invoice: getOut(r.id) });
   }
   if (p === '/api/fin/recurring' && m === 'POST'){
@@ -831,7 +848,7 @@ async function finApi(req, res, url, user){
     if (role !== 'owner') deny();
     if (a[1] === user.id) bad(400, 'self', 'Не можете да премахнете собствения си достъп.');
     if (!q("SELECT 1 FROM users WHERE id = ? AND office_id = ? AND (firm_id = ? OR (firm_id = '' AND ?))").get(a[1], O, F, user.solo ? 1 : 0)) bad(404, 'not_found');
-    q('DELETE FROM sessions WHERE user_id = ?').run(a[1]); q('DELETE FROM resets WHERE user_id = ?').run(a[1]); q('DELETE FROM users WHERE id = ?').run(a[1]);
+    dropUser(a[1]);
     return send(res, 200, { ok: true });
   }
   bad(404, 'not_found');
@@ -903,11 +920,13 @@ async function handle(req, res){
     if (pass.length < 10 || pass.length > 200) bad(400, 'weak_password', 'Паролата трябва да е поне 10 знака.');
     if (q('SELECT 1 FROM users WHERE email = ?').get(email)) bad(409, 'exists', 'Вече има акаунт с този имейл. Ако е Ваш, изберете „Забравена парола“.');
     const needVerify = verifyOn(), link = needVerify ? mailOrigin(req) : '';
-    const oid = rid(9), uid = rid(9);
-    q('INSERT INTO offices(id, name, created, solo) VALUES(?,?,?,?)').run(oid, office, now(), solo ? 1 : 0);
-    const fid = solo ? 'f' + crypto.randomBytes(6).toString('hex') : '';
-    if (solo) q('INSERT INTO firms(office_id, id, data, portal_token) VALUES(?,?,?,?)').run(oid, fid, JSON.stringify({ name: office, eik: '', contact: '', channel: 'email', address: email, auto: false, stats: true }), rid(24));
-    q('INSERT INTO users(id, office_id, email, pass, created, firm_id, crole, verified) VALUES(?,?,?,?,?,?,?,?)').run(uid, oid, email, await hashPass(pass), now(), fid, solo ? 'owner' : '', needVerify ? 0 : 1);
+    const oid = rid(9), uid = rid(9), hp = await hashPass(pass), fid = solo ? 'f' + crypto.randomBytes(6).toString('hex') : '';
+    tx(() => {
+      if (q('SELECT 1 FROM users WHERE email = ?').get(email)) bad(409, 'exists', 'Вече има акаунт с този имейл. Ако е Ваш, изберете „Забравена парола“.');
+      q('INSERT INTO offices(id, name, created, solo) VALUES(?,?,?,?)').run(oid, office, now(), solo ? 1 : 0);
+      if (solo) q('INSERT INTO firms(office_id, id, data, portal_token) VALUES(?,?,?,?)').run(oid, fid, JSON.stringify({ name: office, eik: '', contact: '', channel: 'email', address: email, auto: false, stats: true }), rid(24));
+      q('INSERT INTO users(id, office_id, email, pass, created, firm_id, crole, verified) VALUES(?,?,?,?,?,?,?,?)').run(uid, oid, email, hp, now(), fid, solo ? 'owner' : '', needVerify ? 0 : 1);
+    });
     logAct(req, { id: uid, office_id: oid, firm_id: fid, email }, 'Регистрация', office);
     if (needVerify) sendVerify(uid, email, link);
     return send(res, 200, { ok: true }, { 'Set-Cookie': startSession(req, res, uid) });
@@ -942,8 +961,8 @@ async function handle(req, res){
     const b = await readJson(req), u = q('SELECT id, email FROM users WHERE email = ?').get(String(b.email || '').trim().toLowerCase());
     if (u && link){
       const token = rid(32);
-      q('DELETE FROM resets WHERE user_id = ? OR expires < ?').run(u.id, Date.now());
-      q('INSERT INTO resets(token_hash, user_id, expires) VALUES(?,?,?)').run(sha(token), u.id, Date.now() + 3600000);
+      tx(() => { q('DELETE FROM resets WHERE user_id = ? OR expires < ?').run(u.id, Date.now());
+        q('INSERT INTO resets(token_hash, user_id, expires) VALUES(?,?,?)').run(sha(token), u.id, Date.now() + 3600000); });
       sendMail({ to: u.email, subject: 'Нова парола за FinBridge', text: 'Здравейте!\nЗа да зададете нова парола, отворете тази връзка до един час:\n' + link + '/reset#' + token + '\nАко не сте искали смяна, не правете нищо.' })
         .catch(e => console.error(now(), 'имейл за нова парола не беше изпратен:', e.message));
     }
@@ -954,8 +973,9 @@ async function handle(req, res){
     const b = await readJson(req), pass = String(b.password || ''), r = q('SELECT user_id FROM resets WHERE token_hash = ? AND expires > ?').get(sha(String(b.token || '')), Date.now());
     if (!r) bad(400, 'bad_token', 'Връзката е невалидна или изтекла. Поискайте нова.');
     if (pass.length < 10 || pass.length > 200) bad(400, 'weak_password', 'Паролата трябва да е поне 10 знака.');
-    q('UPDATE users SET pass = ?, verified = 1 WHERE id = ?').run(await hashPass(pass), r.user_id); /* връзката от имейла доказва и адреса */
-    q('DELETE FROM sessions WHERE user_id = ?').run(r.user_id); q('DELETE FROM resets WHERE user_id = ?').run(r.user_id);
+    const hp = await hashPass(pass);
+    tx(() => { q('UPDATE users SET pass = ?, verified = 1 WHERE id = ?').run(hp, r.user_id); /* връзката от имейла доказва и адреса */
+      q('DELETE FROM sessions WHERE user_id = ?').run(r.user_id); q('DELETE FROM resets WHERE user_id = ?').run(r.user_id); });
     { const ru = q('SELECT id, email, office_id, firm_id FROM users WHERE id = ?').get(r.user_id); if (ru) logAct(req, ru, 'Нова парола чрез връзка от имейл'); }
     return send(res, 200, { ok: true });
   }
@@ -963,7 +983,7 @@ async function handle(req, res){
     limit('verify:' + ipOf(req), 20, 3600000);
     const b = await readJson(req), r = q('SELECT user_id FROM verifies WHERE token_hash = ? AND expires > ?').get(sha(String(b.token || '')), Date.now());
     if (!r) bad(400, 'bad_token', 'Връзката е невалидна или изтекла. Влезте и поискайте нова.');
-    q('UPDATE users SET verified = 1 WHERE id = ?').run(r.user_id); q('DELETE FROM verifies WHERE user_id = ?').run(r.user_id);
+    tx(() => { q('UPDATE users SET verified = 1 WHERE id = ?').run(r.user_id); q('DELETE FROM verifies WHERE user_id = ?').run(r.user_id); });
     { const ru = q('SELECT id, email, office_id, firm_id FROM users WHERE id = ?').get(r.user_id); if (ru) logAct(req, ru, 'Потвърден имейл'); }
     return send(res, 200, { ok: true });
   }
@@ -994,8 +1014,8 @@ async function handle(req, res){
       if (row.totp || !row.totp_pending) bad(400, 'no_setup', 'Започнете настройката отначало.');
       const st = totpStep(row.totp_pending, String(b.code || '').replace(/\s/g, ''), 0); if (!st) bad(400, 'bad_code', 'Кодът не е верен. Проверете часовника на телефона.');
       const codes = Array.from({ length: 8 }, () => crypto.randomBytes(5).toString('hex')).map(c => c.slice(0, 5) + '-' + c.slice(5));
-      q("UPDATE users SET totp = totp_pending, totp_pending = '', totp_step = ?, recovery = ? WHERE id = ?").run(st, JSON.stringify(codes.map(c => sha(c.replace(/-/g, '')))), user.id);
-      q('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(user.id, sha(cookies(req).fb_s));
+      tx(() => { q("UPDATE users SET totp = totp_pending, totp_pending = '', totp_step = ?, recovery = ? WHERE id = ?").run(st, JSON.stringify(codes.map(c => sha(c.replace(/-/g, '')))), user.id);
+        q('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(user.id, sha(cookies(req).fb_s)); });
       logAct(req, user, 'Включен двуфакторен вход'); return send(res, 200, { recovery: codes });
     }
     if (p === '/api/2fa/disable'){
@@ -1035,7 +1055,7 @@ async function handle(req, res){
   if ((a = /^\/api\/users\/([A-Za-z0-9_-]{6,40})$/.exec(p)) && m === 'DELETE'){
     if (a[1] === user.id) bad(400, 'self', 'Не можете да премахнете собствения си достъп.');
     if (!q("SELECT 1 FROM users WHERE id = ? AND office_id = ? AND firm_id = ''").get(a[1], O)) bad(404, 'not_found');
-    q('DELETE FROM sessions WHERE user_id = ?').run(a[1]); q('DELETE FROM resets WHERE user_id = ?').run(a[1]); q('DELETE FROM users WHERE id = ?').run(a[1]);
+    dropUser(a[1]);
     return send(res, 200, { ok: true });
   }
   if (p === '/api/password' && m === 'POST'){
@@ -1043,8 +1063,8 @@ async function handle(req, res){
     const b = await readJson(req), next = String(b.next || '');
     if (!(await checkPass(String(b.old || ''), q('SELECT pass FROM users WHERE id = ?').get(user.id).pass))) bad(400, 'bad_password', 'Текущата парола не е вярна.');
     if (next.length < 10 || next.length > 200) bad(400, 'weak_password', 'Новата парола трябва да е поне 10 знака.');
-    q('UPDATE users SET pass = ? WHERE id = ?').run(await hashPass(next), user.id);
-    q('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(user.id, sha(cookies(req).fb_s));
+    const hp = await hashPass(next);
+    tx(() => { q('UPDATE users SET pass = ? WHERE id = ?').run(hp, user.id); q('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(user.id, sha(cookies(req).fb_s)); });
     return send(res, 200, { ok: true });
   }
   if (p === '/api/backup' && m === 'GET'){
@@ -1091,13 +1111,12 @@ async function handle(req, res){
       return send(res, 200, firmOut(req, q('SELECT * FROM firms WHERE office_id = ? AND id = ?').get(O, id)));
     }
     if (m === 'DELETE'){
-      for (const f of q('SELECT id FROM files WHERE office_id = ? AND firm_id = ?').all(O, id)) fs.rmSync(path.join(DATA, 'files', f.id), { force: true });
-      q('DELETE FROM files WHERE office_id = ? AND firm_id = ?').run(O, id);
-      q('DELETE FROM periods WHERE office_id = ? AND firm_id = ?').run(O, id);
-      q('DELETE FROM replies WHERE office_id = ? AND firm_id = ?').run(O, id); q('DELETE FROM questions WHERE office_id = ? AND firm_id = ?').run(O, id); q('DELETE FROM autolog WHERE office_id = ? AND firm_id = ?').run(O, id);
-      q('DELETE FROM fin WHERE office_id = ? AND firm_id = ?').run(O, id); q('DELETE FROM finset WHERE office_id = ? AND firm_id = ?').run(O, id);
-      for (const u of q('SELECT id FROM users WHERE office_id = ? AND firm_id = ?').all(O, id)){ q('DELETE FROM sessions WHERE user_id = ?').run(u.id); q('DELETE FROM resets WHERE user_id = ?').run(u.id); q('DELETE FROM users WHERE id = ?').run(u.id); }
-      q('DELETE FROM firms WHERE office_id = ? AND id = ?').run(O, id);
+      tx(() => {
+        for (const f of q('SELECT id FROM files WHERE office_id = ? AND firm_id = ?').all(O, id)) dropFile(f.id);
+        for (const t of ['files', 'periods', 'replies', 'questions', 'autolog', 'fin', 'finset']) q('DELETE FROM ' + t + ' WHERE office_id = ? AND firm_id = ?').run(O, id);
+        for (const u of q('SELECT id FROM users WHERE office_id = ? AND firm_id = ?').all(O, id)) dropUser(u.id);
+        q('DELETE FROM firms WHERE office_id = ? AND id = ?').run(O, id);
+      });
       return send(res, 200, { ok: true });
     }
   }
@@ -1142,7 +1161,7 @@ async function handle(req, res){
     const f = q('SELECT * FROM files WHERE id = ? AND office_id = ?').get(a[1], O); if (!f) bad(404, 'not_found');
     if (a[2] && m === 'POST'){ q("UPDATE files SET status = 'done' WHERE id = ?").run(f.id); return send(res, 200, { ok: true }); }
     if (m === 'GET') return send(res, 200, fs.readFileSync(path.join(DATA, 'files', f.id)), { 'Content-Type': f.mime, 'Content-Disposition': (/^image\/|^application\/pdf$/.test(f.mime) ? 'inline' : 'attachment') + "; filename*=UTF-8''" + encodeURIComponent(f.name), 'Content-Security-Policy': 'sandbox', 'Cache-Control': 'private, no-store' });
-    if (m === 'DELETE'){ fs.rmSync(path.join(DATA, 'files', f.id), { force: true }); q('DELETE FROM files WHERE id = ?').run(f.id); return send(res, 200, { ok: true }); }
+    if (m === 'DELETE'){ tx(() => { q('DELETE FROM files WHERE id = ?').run(f.id); dropFile(f.id); }); return send(res, 200, { ok: true }); }
   }
   if (p === '/api/ai' && m === 'POST'){
     if (!AI.key) bad(503, 'sampling_disabled', 'Не е зададен ANTHROPIC_API_KEY.');
