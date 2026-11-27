@@ -3,7 +3,7 @@ const assert=require('node:assert'),fs=require('node:fs'),path=require('node:pat
 const PW='parola-parola-1',P=9021;let n=0;const ok=m=>console.log('ok   '+(++n)+'. '+m);
 const pdf=Buffer.from('%PDF-1.4\n% проба\n');
 (async()=>{
-  const srv=await H.startServer(P,{});const db=new DatabaseSync(path.join(srv.dir,'finbridge.db'));
+  const srv=await H.startServer(P,{});const db=new DatabaseSync(path.join(srv.dir,'finbridge.db'));db.exec('PRAGMA busy_timeout=5000');
   const stop=sql=>db.exec(sql),go=name=>db.exec('DROP TRIGGER '+name),count=(sql,...a)=>db.prepare(sql).get(...a).n;
   const onDisk=()=>fs.readdirSync(path.join(srv.dir,'files')).length;
   try{

@@ -20,6 +20,7 @@ form{display:flex;flex-direction:column;gap:12px;margin-top:12px}
 .pill{display:inline-block;font-size:12.5px;font-weight:600;border-radius:12px;padding:2px 10px;background:var(--soft)}.pill.on{color:var(--good)}.pill.off{color:var(--crit)}
 .err{color:var(--crit);min-height:1.4em;font-size:14px}.dim{color:var(--muted);font-size:13.5px}
 code,.key{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace}
+.qr{background:#fff;border-radius:8px;padding:8px;width:236px;margin:8px 0}.qr img{display:block;width:220px;height:220px;image-rendering:pixelated}
 .key{font-size:18px;letter-spacing:.06em;background:var(--soft);border-radius:8px;padding:10px 12px;word-break:break-all;user-select:all}
 .codes{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin:10px 0}
 .codes code{background:var(--soft);border-radius:6px;padding:6px 8px;text-align:center;font-size:15px}
@@ -46,8 +47,10 @@ td.t{white-space:nowrap;font-variant-numeric:tabular-nums}
 
   <div id="setup" hidden>
     <ol>
-      <li>Отворете приложението за удостоверяване и изберете „Добавяне на акаунт“ → „Въвеждане на ключ“.</li>
-      <li>Въведете този ключ (тип: по време, 6 цифри):<div class="key" id="secret"></div>
+      <li id="qr-step" hidden>Отворете приложението за удостоверяване, изберете „Добавяне на акаунт“ и сканирайте кода:
+        <div class="qr"><img id="qr" alt="QR код с ключа за приложението за удостоверяване" width="220" height="220"></div>
+        Ако не можете да сканирате, въведете ключа под него.</li>
+      <li><span id="key-lead">Отворете приложението за удостоверяване и изберете „Добавяне на акаунт“ → „Въвеждане на ключ“.</span> Ключът (тип: по време, 6 цифри):<div class="key" id="secret"></div>
         <div class="row" style="margin-top:8px"><button class="sec" type="button" id="copy">Копирай ключа</button><a id="uri" href="#">Отвори в приложението на това устройство</a></div></li>
       <li>Въведете кода, който приложението показва:</li>
     </ol>
@@ -115,7 +118,8 @@ async function loadLog(){
 const run = (form, err, fn) => { $(form).onsubmit = async e => { e.preventDefault(); $(err).textContent = ''; const b = $(form).querySelector('button[type=submit]'); b.disabled = true; try { await fn(); } catch (x) { $(err).textContent = x.message; } b.disabled = false; }; };
 run('f-setup', 'e-setup', async () => {
   const r = await api('POST', '/api/2fa/setup', { password: $('pw1').value }); $('pw1').value = '';
-  $('secret').textContent = r.secret.replace(/(.{4})/g, '$1 ').trim(); $('secret').dataset.raw = r.secret; $('uri').href = r.uri; show('setup'); $('code1').focus();
+  $('secret').textContent = r.secret.replace(/(.{4})/g, '$1 ').trim(); $('secret').dataset.raw = r.secret; $('uri').href = r.uri;
+  $('qr-step').hidden = !r.qr; if (r.qr) $('qr').src = r.qr; $('key-lead').hidden = !!r.qr; show('setup'); $('code1').focus();
 });
 run('f-enable', 'e-enable', async () => {
   const r = await api('POST', '/api/2fa/enable', { code: $('code1').value }); $('code1').value = ''; codes = r.recovery;

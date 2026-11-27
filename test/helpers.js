@@ -7,7 +7,7 @@ exports.fakeSMTP=port=>new Promise(ok=>{const mails=[];const s=net.createServer(
     if(data){if(l==='.'){data=false;mails.push(cur);cur={cmds:[],body:''};c.write('250 queued\r\n')}else cur.body+=l+'\n';continue}
     cur.cmds.push(l);if(/^EHLO/.test(l))c.write('250-fake\r\n250 AUTH LOGIN\r\n');else if(/^AUTH LOGIN/.test(l)){c.write('334 VXNlcm5hbWU6\r\n');cur.auth=1}
     else if(cur.auth===1){cur.auth=2;c.write('334 UGFzc3dvcmQ6\r\n')}else if(cur.auth===2){cur.auth=3;c.write('235 ok\r\n')}
-    else if(/^DATA/.test(l)){data=true;c.write('354 go\r\n')}else if(/^QUIT/.test(l)){c.write('221 bye\r\n');c.end()}else c.write('250 ok\r\n')}})});s.listen(port,()=>ok({mails,close:()=>s.close()}))});
+    else if(/^RCPT TO:<[^>]*reject/.test(l))c.write('550 no such user\r\n');else if(/^DATA/.test(l)){data=true;c.write('354 go\r\n')}else if(/^QUIT/.test(l)){c.write('221 bye\r\n');c.end()}else c.write('250 ok\r\n')}})});s.listen(port,()=>ok({mails,close:()=>s.close()}))});
 exports.startServer=(port,env)=>new Promise((ok,no)=>{const dir=fs.mkdtempSync(path.join(os.tmpdir(),'fb-'));
   const p=spawn(process.execPath,['--no-warnings',path.join(__dirname,'..','server.js')],{env:{...process.env,PORT:port,DATA_DIR:dir,EMAIL_VERIFY:'false',...env},stdio:['ignore','pipe','inherit']});
   p.stdout.on('data',d=>{if(String(d).includes('слуша'))ok({dir,stop:()=>p.kill()})});p.on('exit',c=>no(new Error('server exited '+c)))});

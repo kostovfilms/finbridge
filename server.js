@@ -2,6 +2,7 @@
 /* FinBridge server. No dependencies: Node.js 22.13+ only (built-in SQLite). */
 const http = require('node:http'), fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto'), net = require('node:net'), tls = require('node:tls');
 const { DatabaseSync } = require('node:sqlite');
+const QR = require('./qr');
 
 const env = process.env;
 const PORT = +env.PORT || 8080;
@@ -174,12 +175,35 @@ function totpStep(secret, code, after){
   for (const st of [t, t - 1, t + 1]){ const w = Buffer.from(totpAt(secret, st)); if (st > after && w.length === c.length && crypto.timingSafeEqual(w, c)) return st; }
   return 0;
 }
+/* Ключът за кодовете се пази шифрован с TOTP_KEY от средата (AES-256-GCM, свързан с потребителя): откраднатата база сама не дава ключовете. */
+const TOTP_KEY = env.TOTP_KEY ? crypto.createHash('sha256').update('finbridge-totp:' + env.TOTP_KEY).digest() : null;
+function seal(s, uid){
+  if (!s || !TOTP_KEY || s.startsWith('enc1:')) return s;
+  const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', TOTP_KEY, iv); c.setAAD(Buffer.from(String(uid)));
+  const ct = Buffer.concat([c.update(s, 'utf8'), c.final()]); return 'enc1:' + Buffer.concat([iv, c.getAuthTag(), ct]).toString('base64url');
+}
+function unseal(s, uid){
+  if (!s || !s.startsWith('enc1:')) return s;
+  try {
+    if (!TOTP_KEY) throw 0; const b = Buffer.from(s.slice(5), 'base64url'), d = crypto.createDecipheriv('aes-256-gcm', TOTP_KEY, b.subarray(0, 12));
+    d.setAAD(Buffer.from(String(uid))); d.setAuthTag(b.subarray(12, 28)); return Buffer.concat([d.update(b.subarray(28)), d.final()]).toString('utf8');
+  } catch (e) { bad(503, 'totp_key', 'Двуфакторният вход временно не работи: сървърът няма верния ключ за шифроване (TOTP_KEY). Свържете се с поддръжката.'); }
+}
+/* При пускане: явните ключове се шифроват, щом има TOTP_KEY; без ключ или с грешен ключ има ясно предупреждение. */
+{
+  const rows = q("SELECT id, totp, totp_pending FROM users WHERE totp != '' OR totp_pending != ''").all();
+  if (TOTP_KEY){ let n = 0; for (const r of rows){ const t = seal(r.totp, r.id), tp = seal(r.totp_pending, r.id); if (t !== r.totp || tp !== r.totp_pending){ q('UPDATE users SET totp = ?, totp_pending = ? WHERE id = ?').run(t, tp, r.id); n++; } }
+    if (n) console.log(now(), 'Шифровани ключове за двуфакторен вход: ' + n + '.');
+    const one = rows.find(r => String(r.totp).startsWith('enc1:')); if (one) try { unseal(one.totp, one.id); } catch (e) { setTimeout(() => alertOwner('totp', 'TOTP_KEY не отваря ключовете в базата. Потребителите с двуфакторен вход няма да могат да влязат.'), 0); }
+  } else if (rows.some(r => String(r.totp).startsWith('enc1:'))) setTimeout(() => alertOwner('totp', 'В базата има шифровани ключове за двуфакторен вход, а TOTP_KEY не е зададен. Тези потребители няма да могат да влязат.'), 0);
+  else if (rows.length) console.warn(now(), 'ВНИМАНИЕ: TOTP_KEY не е зададен. Ключовете за двуфакторен вход се пазят в базата без шифроване.');
+}
 /* Код от приложението или еднократен резервен код. */
 function useCode(u, code){
   code = String(code || '').replace(/\s/g, '');
   /* Редът се чете наново и кодът се изразходва с условен запис: между четенето и записа няма await, така че едновременни заявки не минават с един код. */
   u = q('SELECT id, totp, totp_step, recovery FROM users WHERE id = ?').get(u.id); if (!u || !u.totp) return '';
-  if (/^\d{6}$/.test(code)){ const st = totpStep(u.totp, code, u.totp_step); if (!st) return ''; return q('UPDATE users SET totp_step = ? WHERE id = ? AND totp_step < ?').run(st, u.id, st).changes ? 'totp' : ''; }
+  if (/^\d{6}$/.test(code)){ const st = totpStep(unseal(u.totp, u.id), code, u.totp_step); if (!st) return ''; return q('UPDATE users SET totp_step = ? WHERE id = ? AND totp_step < ?').run(st, u.id, st).changes ? 'totp' : ''; }
   const h = sha(code.toLowerCase().replace(/-/g, '')); let list; try { list = JSON.parse(u.recovery); } catch (e) { list = []; }
   if (code.length < 8 || !list.includes(h)) return '';
   q('UPDATE users SET recovery = ? WHERE id = ?').run(JSON.stringify(list.filter(x => x !== h)), u.id); return 'recovery';
@@ -213,7 +237,7 @@ function sendVerify(uid, email, link){
   tx(() => { q('DELETE FROM verifies WHERE user_id = ? OR expires < ?').run(uid, Date.now());
     q('INSERT INTO verifies(token_hash, user_id, expires) VALUES(?,?,?)').run(sha(token), uid, Date.now() + 7 * 864e5); });
   sendMail({ to: email, subject: 'Потвърдете имейла си във FinBridge', text: 'Здравейте!\nЗа да потвърдите, че този адрес е Ваш, отворете връзката до 7 дни:\n' + link + '/verify#' + token + '\nДокато адресът не е потвърден, FinBridge не изпраща писма до клиентите Ви.\nАко не сте създавали акаунт, не правете нищо.' })
-    .catch(e => console.error(now(), 'имейл за потвърждение не беше изпратен:', e.message));
+    .catch(mailFailed('имейл за потвърждение'));
 }
 function startSession(req, res, userId){
   const token = rid(32);
@@ -316,6 +340,27 @@ function sendMail({ to, subject, text, replyTo }){
   });
 }
 
+/* ---------- известия до поддръжката ---------- */
+/* Грешка, която никой не вижда, става писмо до ALERT_EMAIL и/или заявка към ALERT_WEBHOOK (Slack, Teams и подобни, поле "text").
+   От всеки вид се праща най-много едно известие на ALERT_EVERY_MIN минути; следващото казва колко са били пропуснати. */
+const ALERT = { to: String(env.ALERT_EMAIL || '').trim(), hook: String(env.ALERT_WEBHOOK || '').trim(), every: (parseFloat(env.ALERT_EVERY_MIN) || 60) * 60000 };
+const ALERT_KIND = { server: 'вътрешна грешка на сървъра', remind: 'неизпратено напомняне към клиент', recur: 'неиздадена повтаряща се фактура', mail: 'неизпратено системно писмо', totp: 'двуфакторният вход не работи' };
+const alerted = new Map();
+function alertOwner(kind, text){
+  text = String(text).replace(/[\u0000-\u0008\u000b-\u001f]/g, ' ').slice(0, 1500);
+  console.error(now(), 'ИЗВЕСТИЕ (' + kind + '):', text);
+  if (!(ALERT.to && SMTP.host && SMTP.from) && !ALERT.hook) return;
+  const a = alerted.get(kind) || { last: 0, missed: 0 }; alerted.set(kind, a);
+  if (Date.now() - a.last < ALERT.every){ a.missed++; return; }
+  const missed = a.missed; a.last = Date.now(); a.missed = 0;
+  const title = 'FinBridge: ' + (ALERT_KIND[kind] || kind), body = text + (missed ? '\nОт предишното известие от този вид има още ' + missed + ' случая.' : '') + '\nВреме: ' + now() + (BASE_URL ? '\nСайт: ' + BASE_URL : '');
+  if (ALERT.to && SMTP.host && SMTP.from) sendMail({ to: ALERT.to, subject: title, text: body }).catch(e => console.error(now(), 'известието не беше изпратено по имейл:', e.message));
+  if (ALERT.hook) fetch(ALERT.hook, { method: 'POST', signal: AbortSignal.timeout(10000), headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: title + '\n' + body }) })
+    .then(r => { if (!r.ok) console.error(now(), 'известието не беше прието от ALERT_WEBHOOK:', r.status); }, e => console.error(now(), 'известието не стигна до ALERT_WEBHOOK:', e.message));
+}
+const mailFailed = what => e => alertOwner('mail', what[0].toUpperCase() + what.slice(1) + ' не беше изпратен: ' + e.message);
+const safePath = u => String(u || '').split('?')[0].replace(/\/u\/[^/]+/, '/u/…');
+
 /* ---------- Claude ---------- */
 function parseJsonLoose(t){
   const tries = [t, (/```(?:json)?\s*([\s\S]*?)```/.exec(t) || [])[1]];
@@ -398,7 +443,7 @@ async function remindTick(){
       if (!d.auto || !EMAIL.test(to)) continue;
       const last = q('SELECT MAX(sent_at) AS t FROM autolog WHERE office_id = ? AND firm_id = ?').get(f.office_id, f.id).t;
       if (last && Date.now() - Date.parse(last) < REMIND.days * 864e5 - 60000) continue;
-      let open; try { open = missingFor(f.office_id, f.id, t.period).filter(x => !x.replied); } catch (e) { console.error(now(), 'напомняне: повредени данни за фирма', f.id, e.message); continue; }
+      let open; try { open = missingFor(f.office_id, f.id, t.period).filter(x => !x.replied); } catch (e) { alertOwner('remind', 'Повредени данни за фирма ' + (d.name || f.id) + ': ' + e.message); continue; }
       if (!open.length) continue;
       if (!mailOk(f.office_id)) continue; /* #5: автоматичните писма влизат в общия лимит на кантората */
       const per = open[open.length - 1].period, list = open.filter(x => x.period === per).map(x => x.tx);
@@ -406,12 +451,12 @@ async function remindTick(){
       const u = q("SELECT email FROM users WHERE office_id = ? AND firm_id = '' ORDER BY created LIMIT 1").get(f.office_id);
       try { await sendMail({ to, subject: 'Липсващи документи за ' + Core.periodLabel(per), text, replyTo: u && u.email });
         q('INSERT INTO autolog(office_id, firm_id, sent_at, count) VALUES(?,?,?,?)').run(f.office_id, f.id, now(), list.length); sent++; }
-      catch (e) { console.error(now(), 'автоматично напомняне до', to, 'не беше изпратено:', e.message); }
+      catch (e) { alertOwner('remind', 'Автоматичното напомняне до ' + to + ' (фирма ' + (d.name || f.id) + ') не беше изпратено: ' + e.message); }
     }
   } finally { ticking = false; }
   return sent;
 }
-setInterval(() => remindTick().catch(e => console.error(e)), REMIND.tick).unref();
+setInterval(() => remindTick().catch(e => alertOwner('remind', 'Напомнянията спряха: ' + e.message)), REMIND.tick).unref();
 
 /* ---------- финанси на фирмата ---------- */
 const FIN_START = { expense: 'submitted', bill: 'submitted', invoice: 'open', budget: 'active' }, CROLES = ['owner', 'approver', 'member'];
@@ -557,11 +602,12 @@ function recurRun(O, F){
     /* №23: пропуснат период (сървърът е спрял или графикът е изостанал) не се издава сам с днешна дата; чака потвърждение. */
     while (d.f.mode === 'auto' && r.status === 'active' && d.f.next <= today && Fin.dayDiff(today, d.f.next) <= Fin.RECUR_GRACE && guard++ < 12){
       try { recurIssue(O, F, r, d, 'Автоматично (повтаряща се фактура)'); }
-      catch (e) { d.f.error = e instanceof HttpError ? e.message : 'Неуспешно издаване.'; q('UPDATE fin SET data = ?, updated = ? WHERE id = ?').run(JSON.stringify(d), now(), r.id); console.error(now(), 'повтаряща се фактура', r.id, d.f.error); break; }
+      catch (e) { d.f.error = e instanceof HttpError ? e.message : 'Неуспешно издаване.'; q('UPDATE fin SET data = ?, updated = ? WHERE id = ?').run(JSON.stringify(d), now(), r.id);
+        const fn = (q('SELECT data FROM firms WHERE office_id = ? AND id = ?').get(O, F) || {}).data; alertOwner('recur', 'Повтарящата се фактура към ' + d.f.party + ' (фирма ' + (fn ? JSON.parse(fn).name : F) + ') не беше издадена: ' + d.f.error); break; }
     }
   }
 }
-function recurTick(){ for (const r of q("SELECT DISTINCT office_id, firm_id FROM fin WHERE type = 'recur' AND status = 'active'").all()) { try { recurRun(r.office_id, r.firm_id); } catch (e) { console.error(now(), e); } } }
+function recurTick(){ for (const r of q("SELECT DISTINCT office_id, firm_id FROM fin WHERE type = 'recur' AND status = 'active'").all()) { try { recurRun(r.office_id, r.firm_id); } catch (e) { alertOwner('recur', 'Проверката на повтарящите се фактури спря: ' + e.message); } } }
 setInterval(recurTick, 3600000).unref(); setTimeout(recurTick, 5000).unref();
 
 async function finApi(req, res, url, user){
@@ -729,7 +775,7 @@ async function finApi(req, res, url, user){
       });
       const u = !mine && (to === 'approved' || to === 'rejected') && SMTP.host && SMTP.from && q('SELECT email FROM users WHERE id = ?').get(r.owner);
       if (u) sendMail({ to: u.email, subject: (to === 'approved' ? 'Одобрен' : 'Отказан') + ' разход: ' + d.f.party, text: 'Здравейте!\nЗаявката ви за ' + d.f.amount.toFixed(2) + ' към ' + d.f.party + ' от ' + d.f.date + ' е ' + (to === 'approved' ? 'одобрена.' : 'отказана. Причина: ' + note) + '\n' + mailOrigin(req) })
-        .catch(e => console.error(now(), 'имейл за решение не беше изпратен:', e.message));
+        .catch(mailFailed('имейл за решение'));
       return send(res, 200, getOut(r.id));
     }
   }
@@ -942,7 +988,7 @@ async function handle(req, res){
     const failed = what => {
       if (bump(acct, 900000) === LOGIN_ACCT_MAX && u && SMTP.host && SMTP.from)
         sendMail({ to: u.email, subject: 'Временно спрян вход във FinBridge', text: 'Здравейте!\nИма много неуспешни опити за вход в акаунта Ви. Входът от нови устройства е спрян за 15 минути. От устройство, от което вече сте влизали, можете да влезете както обикновено.\nАко не сте били Вие, сменете паролата си и включете двуфакторен вход.' })
-          .catch(e => console.error(now(), 'имейл за спрян вход не беше изпратен:', e.message));
+          .catch(mailFailed('имейл за спрян вход'));
       if (!u) return; const k = 'fail' + u.id, t = Date.now(); if (!(lastLog.get(k) > t - 60000)){ lastLog.set(k, t); logAct(req, u, 'Неуспешен вход', what); } };
     if (!(await checkPass(String(b.password || ''), u && u.pass)) || !u){ failed('грешна парола'); bad(401, 'bad_login', 'Грешен имейл или парола.'); }
     let how = '';
@@ -964,7 +1010,7 @@ async function handle(req, res){
       tx(() => { q('DELETE FROM resets WHERE user_id = ? OR expires < ?').run(u.id, Date.now());
         q('INSERT INTO resets(token_hash, user_id, expires) VALUES(?,?,?)').run(sha(token), u.id, Date.now() + 3600000); });
       sendMail({ to: u.email, subject: 'Нова парола за FinBridge', text: 'Здравейте!\nЗа да зададете нова парола, отворете тази връзка до един час:\n' + link + '/reset#' + token + '\nАко не сте искали смяна, не правете нищо.' })
-        .catch(e => console.error(now(), 'имейл за нова парола не беше изпратен:', e.message));
+        .catch(mailFailed('имейл за нова парола'));
     }
     return send(res, 200, { ok: true, mail: !!(SMTP.host && SMTP.from) });
   }
@@ -1007,12 +1053,13 @@ async function handle(req, res){
     if (p === '/api/2fa/setup'){
       if (row.totp) bad(400, 'already', 'Двуфакторният вход вече е включен.');
       if (!(await checkPass(String(b.password || ''), row.pass))) bad(400, 'bad_password', 'Паролата не е вярна.');
-      const secret = b32enc(crypto.randomBytes(20)); q('UPDATE users SET totp_pending = ? WHERE id = ?').run(secret, user.id);
-      return send(res, 200, { secret, uri: 'otpauth://totp/' + encodeURIComponent('FinBridge:' + user.email) + '?secret=' + secret + '&issuer=FinBridge&algorithm=SHA1&digits=6&period=30' });
+      const secret = b32enc(crypto.randomBytes(20)); q('UPDATE users SET totp_pending = ? WHERE id = ?').run(seal(secret, user.id), user.id);
+      const uri = 'otpauth://totp/' + encodeURIComponent('FinBridge:' + user.email) + '?secret=' + secret + '&issuer=FinBridge&algorithm=SHA1&digits=6&period=30', svg = QR.svg(uri);
+      return send(res, 200, { secret, uri, qr: svg ? 'data:image/svg+xml;base64,' + Buffer.from(svg).toString('base64') : '' });
     }
     if (p === '/api/2fa/enable'){
       if (row.totp || !row.totp_pending) bad(400, 'no_setup', 'Започнете настройката отначало.');
-      const st = totpStep(row.totp_pending, String(b.code || '').replace(/\s/g, ''), 0); if (!st) bad(400, 'bad_code', 'Кодът не е верен. Проверете часовника на телефона.');
+      const st = totpStep(unseal(row.totp_pending, user.id), String(b.code || '').replace(/\s/g, ''), 0); if (!st) bad(400, 'bad_code', 'Кодът не е верен. Проверете часовника на телефона.');
       const codes = Array.from({ length: 8 }, () => crypto.randomBytes(5).toString('hex')).map(c => c.slice(0, 5) + '-' + c.slice(5));
       tx(() => { q("UPDATE users SET totp = totp_pending, totp_pending = '', totp_step = ?, recovery = ? WHERE id = ?").run(st, JSON.stringify(codes.map(c => sha(c.replace(/-/g, '')))), user.id);
         q('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(user.id, sha(cookies(req).fb_s)); });
@@ -1088,7 +1135,7 @@ async function handle(req, res){
     const id = rid(12); q('INSERT INTO questions(id, office_id, firm_id, period, tx_id, question, status, asked) VALUES(?,?,?,?,?,?,?,?)').run(id, O, firm, per, tx, text, 'open', now());
     const d = JSON.parse(f.data), to = String(d.address || '').trim();
     if (SMTP.host && SMTP.from && EMAIL.test(to) && mailOk(O)) sendMail({ to, replyTo: user.email, subject: 'Въпрос от счетоводителя', text: 'Здравейте' + (d.contact ? ', ' + d.contact : '') + '!\nСчетоводителят ви има въпрос:\n' + text + '\nОтговорете тук: ' + mailOrigin(req) + '/u/' + f.portal_token })
-      .catch(e => console.error(now(), 'имейл с въпрос не беше изпратен:', e.message));
+      .catch(mailFailed('имейл с въпрос'));
     return send(res, 200, { id });
   }
   if ((a = /^\/api\/questions\/([A-Za-z0-9_-]{8,40})\/close$/.exec(p)) && m === 'POST'){
@@ -1191,7 +1238,8 @@ const server = http.createServer((req, res) => {
   res.on('finish', () => autoLog(req, res));
   if (isHttps(req)) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   handle(req, res).catch(e => {
-    if (!(e instanceof HttpError)) console.error(now(), req.method, req.url, e);
+    if (!(e instanceof HttpError)){ console.error(now(), req.method, safePath(req.url), e); alertOwner('server', req.method + ' ' + safePath(req.url) + ': ' + (e && e.message || e)); }
+    else if (e.code === 'totp_key') alertOwner('totp', e.message);
     if (res.headersSent) return res.end();
     send(res, e.status || 500, { error: e.code || 'server_error', message: e instanceof HttpError ? e.message : 'Вътрешна грешка.' });
   });
