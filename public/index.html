@@ -1201,20 +1201,27 @@ function vRules(){
     (cp.length ? cp.map(([k, r]) => '<tr><td class="wrap">' + esc(r.name || k) + '</td><td><button class="btn small quiet" data-act="del-rule" data-kind="cp" data-id="' + esc(k) + '">Изтрий</button></td></tr>').join('') : '<tr><td class="empty">Още няма такива правила.</td></tr>') + '</tbody></table></div></div>';
 }
 function vOffice(){
-  const me = FB.me || {}, us = S.users;
-  const rows = (us || []).map(u => '<tr><td class="wrap">' + esc(u.email) + (u.me ? ' <span class="chip">вие</span>' : '') + '</td><td class="dim">от ' + D(u.created) + '</td><td>' +
-    (u.me ? '' : '<button class="btn small quiet" data-act="del-user" data-id="' + esc(u.id) + '">' + (S.confirm === 'user' + u.id ? 'Потвърди премахването' : 'Премахни') + '</button>') + '</td></tr>').join('');
+  const me = FB.me || {}, us = S.users, own = me.role === 'owner', inv = S.invites || [], RL = {owner: 'собственик', accountant: 'счетоводител'};
+  const rows = (us || []).map(u => '<tr><td class="wrap">' + esc(u.email) + (u.me ? ' <span class="chip">вие</span>' : '') + '</td><td>' + (RL[u.role] || '') + '</td><td class="dim">от ' + D(u.created) + '</td><td>' +
+    (own && !u.me ? '<div class="tools"><button class="btn small quiet" data-act="user-role" data-id="' + esc(u.id) + '" data-role="' + (u.role === 'owner' ? 'accountant' : 'owner') + '">' + (u.role === 'owner' ? 'Направи счетоводител' : 'Направи собственик') + '</button>' +
+      '<button class="btn small quiet" data-act="del-user" data-id="' + esc(u.id) + '">' + (S.confirm === 'user' + u.id ? 'Потвърди премахването' : 'Премахни') + '</button></div>' : '') + '</td></tr>').join('') +
+    inv.map(i => '<tr><td class="wrap">' + esc(i.email) + ' <span class="chip">покана</span></td><td>' + (RL[i.role] || '') + '</td><td class="dim">важи до ' + esc(Core.fd(i.expires)) + '</td><td>' +
+      (own ? '<button class="btn small quiet" data-act="del-invite" data-id="' + esc(i.id) + '">Отмени поканата</button>' : '') + '</td></tr>').join('');
   return '<div class="head"><div><h1>' + esc(me.office || 'Кантора') + '</h1><p class="sub">Екип, пароли и архив на данните.</p></div></div>' + banner() +
-    '<div class="panel"><div class="pad"><h2>Екип</h2><div class="dim">Всички в екипа виждат всички фирми на кантората.</div></div><div class="scroll"><table style="min-width:420px"><tbody>' +
+    '<div class="panel"><div class="pad"><h2>Екип</h2><div class="dim">Всички в екипа виждат всички фирми на кантората. Собственикът кани и премахва колеги, трие фирми и вижда журнала и архива.</div></div><div class="scroll"><table style="min-width:520px"><tbody>' +
     (us ? rows : '<tr><td class="empty">Зареждане…</td></tr>') + '</tbody></table></div>' +
-    '<form class="pad" data-form="user"><div class="form"><label>Имейл на колегата<input type="email" id="user-email" name="email" required autocomplete="off"></label>' +
-    '<label>Временна парола (поне 10 знака)<input type="text" id="user-pass" name="password" required minlength="10" autocomplete="off"></label></div><div class="tools"><button class="btn primary" type="submit">Добави колега</button></div></form></div>' +
+    (own ? '<form class="pad" data-form="invite"><div class="form"><label>Имейл на колегата<input type="email" id="invite-email" name="email" required autocomplete="off"></label>' +
+      '<label>Роля<select id="invite-role" name="role"><option value="accountant">Счетоводител</option><option value="owner">Собственик</option></select></label></div>' +
+      '<div class="tools"><button class="btn primary" type="submit">Изпрати покана</button><span class="dim">Колегата получава връзка, валидна 7 дни, и сам задава паролата си.</span></div>' +
+      (S.inviteLink ? '<div class="note info" role="status">' + (S.inviteLink.mailed ? 'Изпратихме поканата до ' + esc(S.inviteLink.email) + '. Ако не стигне, предайте тази връзка:' : 'Имейлът не е настроен. Предайте тази връзка на ' + esc(S.inviteLink.email) + ' по сигурен канал:') +
+        '<div class="tools" style="margin-top:6px"><input id="invite-link" readonly value="' + esc(S.inviteLink.link) + '" style="flex:1;min-width:0"><button class="btn small" type="button" data-act="copy-invite">' + (S.copied === 'invite' ? 'Копирано' : 'Копирай връзката') + '</button></div></div>' : '') + '</form>'
+      : '<div class="pad dim">Само собственикът на кантората кани и премахва колеги.</div>') + '</div>' +
     '<form class="panel pad" data-form="pass"><h2>Смяна на паролата</h2><div class="form"><label>Текуща парола<input type="password" id="pass-old" name="old" required autocomplete="current-password" style="border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:var(--surface)"></label>' +
     '<label>Нова парола (поне 10 знака)<input type="password" id="pass-new" name="next" required minlength="10" autocomplete="new-password" style="border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:var(--surface)"></label></div><div class="tools"><button class="btn primary" type="submit">Смени паролата</button></div></form>' +
     '<div class="panel pad"><h2>Данни и настройки</h2><dl class="fields"><dt>Разчитане с Claude</dt><dd>' + (me.ai ? 'включено' : 'изключено, документите се въвеждат ръчно') + '</dd>' +
     '<dt>Изпращане на имейли</dt><dd>' + (me.mail ? 'настроено' : 'не е настроено, текстовете се копират ръчно') + '</dd>' +
     '<dt>Автоматични напомняния</dt><dd>' + (me.mail ? 'на всеки ' + plural(me.remindDays || 3, 'ден', 'дни') + ' в работно време, за фирмите с отметка' : 'изискват настроен имейл') + '</dd></dl>' +
-    '<div class="tools"><a class="btn" href="/api/backup" download>Изтегли архив на данните (JSON)</a><span class="dim">Съдържа фирмите и всички месеци, без оригиналните файлове.</span></div></div>';
+    (me.role === 'owner' ? '<div class="tools"><a class="btn" href="/api/backup" download>Изтегли архив на данните (JSON)</a><span class="dim">Съдържа фирмите и всички месеци, без оригиналните файлове.</span></div>' : '<div class="dim">Архивът на данните се изтегля от собственика на кантората.</div>') + '</div>';
 }
 
 function render(){
@@ -1294,6 +1301,9 @@ document.addEventListener('click', async e => {
     case 'col-up': case 'col-down': { const on = (S.ecfg.cols && S.ecfg.cols.length ? S.ecfg.cols : Core.DEFAULT_COLS).slice(), i = on.indexOf(id), j = act === 'col-up' ? i - 1 : i + 1;
       if (i >= 0 && j >= 0 && j < on.length){ [on[i], on[j]] = [on[j], on[i]]; S.ecfg.cols = on; saveEcfg(); } S.setupOpen = true; break; }
     case 'col-reset': S.ecfg = {}; saveEcfg(); S.setupOpen = true; break;
+    case 'user-role': try { await FB.setRole(id, el.dataset.role); S.users = await FB.users(); S.toast = {cls: 'good', text: 'Ролята е сменена.'}; } catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Неуспешно.'}; } break;
+    case 'del-invite': try { await FB.cancelInvite(id); S.invites = await FB.invites(); S.inviteLink = null; S.toast = {cls: 'good', text: 'Поканата е отменена.'}; } catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Неуспешно.'}; } break;
+    case 'copy-invite': return copy(S.inviteLink.link, 'invite');
     case 'del-user': if (conf !== 'user' + id){ S.confirm = 'user' + id; break; } try { await FB.delUser(id); S.users = await FB.users(); S.toast = {cls: 'good', text: 'Достъпът е премахнат.'}; } catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Неуспешно.'}; } break;
     case 'verify-resend': try { await FB.resendVerify(); S.toast = {cls: 'good', text: 'Изпратихме ново писмо за потвърждение.'}; } catch (x) { S.toast = {cls: 'crit', text: x.message || 'Писмото не беше изпратено.'}; } break;
     case 'logout': await FB.logout(); return;
@@ -1324,8 +1334,8 @@ document.addEventListener('submit', async e => {
     catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Въпросът не беше изпратен.'}; }
     S.editing = null; return render();
   }
-  if (form.dataset.form === 'user'){
-    try { await FB.addUser(t(v.email), v.password); S.users = await FB.users(); S.toast = {cls: 'good', text: 'Добавен е ' + t(v.email) + '. Предайте му паролата по сигурен канал.'}; }
+  if (form.dataset.form === 'invite'){
+    try { const r = await FB.invite(t(v.email).toLowerCase(), v.role); S.inviteLink = {link: r.link, mailed: r.mailed, email: r.invite.email}; S.invites = await FB.invites(); S.toast = {cls: 'good', text: 'Поканата за ' + r.invite.email + ' е готова.'}; }
     catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Неуспешно.'}; }
     return render();
   }
@@ -1388,7 +1398,7 @@ document.addEventListener('dragleave', e => { const z = e.target.closest && e.ta
 document.addEventListener('drop', e => { const z = e.target.closest && e.target.closest('[data-drop]'); if (!z) return; e.preventDefault(); const fs = e.dataTransfer.files; if (!fs.length) return;
   if (z.dataset.drop === 'docs') onDocs(fs); else onStatement(fs[0]); });
 document.addEventListener('toggle', e => { if (e.target.id === 'exp-setup') S.setupOpen = e.target.open; }, true);
-function loadOffice(){ if (window.FB && view() === 'office') FB.users().then(u => { S.users = u; render(); }).catch(() => {}); }
+function loadOffice(){ if (window.FB && view() === 'office') Promise.all([FB.users(), (FB.me || {}).role === 'owner' ? FB.invites() : []]).then(([u, i]) => { S.users = u; S.invites = i; render(); }).catch(() => {}); }
 window.addEventListener('hashchange', () => { S.editing = null; S.confirm = null; render(); loadOffice(); });
 boot();
 </script>
