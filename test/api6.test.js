@@ -92,11 +92,17 @@ const PW='parola-parola-1';
   let st=await state(own);const auto=st.items.find(i=>i.id===r.body.id);assert.equal(auto.count,1);assert.equal(st.items.filter(i=>i.party==='Автоматичен Клиент ООД'&&i.type==='invoice').length,1);
   ok('automatic mode: the first invoice is issued as soon as the template is due');
   setNext(auto.id,mo(today.slice(0,8)+'05',-3).slice(0,8)+'05');
-  st=await state(own);const gens=st.items.filter(i=>i.party==='Автоматичен Клиент ООД'&&i.type==='invoice');assert.equal(gens.length,1+4,'3 пропуснати месеца и текущият');
+  /* №23: пропуснатите месеци не се издават сами с днешна дата; шаблонът чака човек да издаде или пропусне всеки период. */
+  const autoInv=s=>s.items.filter(i=>i.party==='Автоматичен Клиент ООД'&&i.type==='invoice');
+  st=await state(own);assert.equal(autoInv(st).length,1,'пропуснатите месеци не се издават сами');assert(st.items.find(i=>i.id===auto.id).next<=today,'шаблонът чака потвърждение');
+  assert.equal((await own('POST','/api/fin/recurring/'+auto.id+'/issue')).status,200);
+  for(let k=0;k<6;k++){const t=(await state(own)).items.find(i=>i.id===auto.id);if(t.next>today)break;assert.equal((await own('POST','/api/fin/recurring/'+auto.id+'/skip')).status,200)}
+  const cur05=today.slice(0,8)+'05',inGrace=today>=cur05&&(Date.parse(today)-Date.parse(cur05))/864e5<=5;
+  st=await state(own);const gens=autoInv(st);assert.equal(gens.length,2+(inGrace?1:0),'първата, издадената ръчно и текущата, ако е в срока от 5 дни');
   assert.equal(new Set(gens.map(i=>i.number)).size,gens.length);const nums=gens.map(i=>+i.number).sort((a,b)=>a-b);for(let i=1;i<nums.length;i++)assert.equal(nums[i],nums[i-1]+1,'без пропуски в номерата');
   assert(st.items.find(i=>i.id===auto.id).next>today);
-  assert.equal((await state(own)).items.filter(i=>i.party==='Автоматичен Клиент ООД'&&i.type==='invoice').length,5,'второ зареждане не издава повторно');
-  ok('catching up after missed months: one invoice per missed month, consecutive numbers with no gaps, and loading the page again never issues twice');
+  assert.equal(autoInv(await state(own)).length,gens.length,'второ зареждане не издава повторно');
+  ok('missed months are not issued automatically with today\'s date: the template waits, a person issues or skips each period, numbers stay consecutive and loading again never issues twice');
 
   /* край, пауза, пропускане, грешка */
   r=await rec(own,{...rbase,party:'Краен Срок ООД',mode:'auto',next:today,end:today,lines:[{name:'Еднократно',qty:1,unit:'бр.',price:10}]});assert.equal((await state(own)).items.find(i=>i.id===r.body.id).status,'done');

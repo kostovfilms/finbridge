@@ -84,6 +84,7 @@
     addUser: (email, password) => api('POST', '/api/users', { email, password }),
     delUser: id => api('DELETE', '/api/users/' + id),
     password: (old, next) => api('POST', '/api/password', { old, next }),
+    resendVerify: () => api('POST', '/api/verify/resend'),
     logout: async () => { try { await api('POST', '/api/logout'); } catch (e) {} location.href = '/login'; } };
   window.claude = { use: async name => {
     const me = await meP.catch(() => null); if (!me) return null;

@@ -9,7 +9,7 @@ exports.fakeSMTP=port=>new Promise(ok=>{const mails=[];const s=net.createServer(
     else if(cur.auth===1){cur.auth=2;c.write('334 UGFzc3dvcmQ6\r\n')}else if(cur.auth===2){cur.auth=3;c.write('235 ok\r\n')}
     else if(/^DATA/.test(l)){data=true;c.write('354 go\r\n')}else if(/^QUIT/.test(l)){c.write('221 bye\r\n');c.end()}else c.write('250 ok\r\n')}})});s.listen(port,()=>ok({mails,close:()=>s.close()}))});
 exports.startServer=(port,env)=>new Promise((ok,no)=>{const dir=fs.mkdtempSync(path.join(os.tmpdir(),'fb-'));
-  const p=spawn(process.execPath,['--no-warnings',path.join(__dirname,'..','server.js')],{env:{...process.env,PORT:port,DATA_DIR:dir,...env},stdio:['ignore','pipe','inherit']});
+  const p=spawn(process.execPath,['--no-warnings',path.join(__dirname,'..','server.js')],{env:{...process.env,PORT:port,DATA_DIR:dir,EMAIL_VERIFY:'false',...env},stdio:['ignore','pipe','inherit']});
   p.stdout.on('data',d=>{if(String(d).includes('слуша'))ok({dir,stop:()=>p.kill()})});p.on('exit',c=>no(new Error('server exited '+c)))});
 exports.invoiceReply=j=>{const t=j.messages[0].content.find(c=>c.type==='text').text;
   const inv=(s,e,n,d,b,v,tot,l)=>JSON.stringify({docType:'invoice',supplier:s,supplierEik:e,supplierVat:'BG'+e,recipientEik:'203456781',number:n,date:d,currency:'EUR',base:b,vat:v,total:tot,lines:[l],confidence:.96,notes:'',category:s.includes('Гориво')?'fuel':s.includes('Бетон')?'materials':null,subject:l.name});

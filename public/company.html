@@ -81,8 +81,12 @@ const Fin = (() => {
   const DEFAULTS = { balance: 0, balanceDate: '', approverLimit: 0, receiptOver: 0, cats: CATS, seller: {}, invNext: 1 };
   const PAY = { own: 'Лични средства', card: 'Фирмена карта', cash: 'Каса', bank: 'Банков превод' };
   const STATUS = { submitted: 'Чака одобрение', approved: 'Одобрен', rejected: 'Отказан', paid: 'Платен', open: 'Неплатена', void: 'Анулирана', credited: 'Кредитирана', issued: 'Издадено', active: 'Активен', paused: 'На пауза', done: 'Приключил' };
+  /* №23: автоматичното издаване не наваксва периоди, по-стари от 5 дни (срокът за издаване на фактура по ЗДДС); тях ги потвърждава човек. */
+  const RECUR_GRACE = 5;
   const ROLES = { owner: 'Собственик', approver: 'Одобряващ', member: 'Служител', accountant: 'Счетоводител' };
-  const r2 = n => Math.round(n * 100) / 100;
+  /* №16: закръгляне до стотинка, половината нагоре, без грешката на плаващата запетая (0,145 → 0,15; 1,035 → 1,04). */
+  const r2 = n => { const x = +(+n || 0).toPrecision(12), [m, e] = String(Math.abs(x)).split('e'); return (x < 0 ? -1 : 1) * Number(Math.round(Number(m + 'e' + ((+e || 0) + 2))) + 'e-2') || 0; };
+  const c100 = v => Math.round(r2(v) * 100); /* сума в цели стотинки, за сравнения без допуск */
   const addDays = (d, n) => { const t = new Date(d + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
   const dayDiff = (a, b) => Math.round((Date.parse(a + 'T00:00:00Z') - Date.parse(b + 'T00:00:00Z')) / 864e5);
   const money = n => (n < 0 ? '-' : '') + Math.abs(+n || 0).toFixed(2).replace('.', ',').replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
@@ -90,7 +94,8 @@ const Fin = (() => {
   const counted = i => i.status === 'approved' || i.status === 'paid';
   /* Остатък за плащане по запис с частични плащания. */
   const left = i => r2(i.amount - (i.paid || 0) - (i.credited || 0));
-  const addMonths = (s, n, day) => { const t = (+s.slice(0, 4)) * 12 + (+s.slice(5, 7) - 1) + n; return Math.floor(t / 12) + '-' + String(t % 12 + 1).padStart(2, '0') + '-' + String(Math.min(day, 28)).padStart(2, '0'); };
+  /* №23: денят се свива до дължината на месеца, така че 31 значи „последният ден“ (28.02, 30.04, 31.05). */
+  const addMonths = (s, n, day) => { const t = (+s.slice(0, 4)) * 12 + (+s.slice(5, 7) - 1) + n, y = Math.floor(t / 12), mo = t % 12 + 1, last = new Date(Date.UTC(y, mo, 0)).getUTCDate(); return y + '-' + String(mo).padStart(2, '0') + '-' + String(Math.max(1, Math.min(day, last))).padStart(2, '0'); };
 
   /* Кой може да одобри или откаже заявка. */
   function canApprove(item, actor, set){
@@ -167,7 +172,7 @@ const Fin = (() => {
       if (!elig(i)) continue;
       const sign = i.type === 'invoice' ? 1 : -1, win = i.type === 'expense' ? [-1, 7] : [-3, 120], num = numKey(i.number), rem = left(i);
       for (const t of free){
-        const amt = Math.abs(t.amount), full = Math.abs(amt - rem) <= 0.011, part = !full && amt < rem && i.type !== 'expense';
+        const amt = Math.abs(t.amount), full = c100(amt) === c100(rem), part = !full && amt < rem && i.type !== 'expense';
         if (Math.sign(t.amount) !== sign || !(full || part) || (i.skip || []).includes(t.key)) continue;
         const lag = dayDiff(t.date, i.date); if (lag < win[0] || lag > win[1]) continue;
         const text = t.cp + ' ' + (t.desc || ''), byNum = num.length >= 3 && (text.match(/\d+/g) || []).some(x => x.replace(/^0+/, '') === num), strong = byNum || sim(i.party, text) >= 0.5;
@@ -182,10 +187,10 @@ const Fin = (() => {
     const doneI = new Set(auto.map(byI)), doneT = new Set(auto.map(byT)), sums = {};
     /* Вноска се отнася сама само по номер на фактурата и докато сборът не надхвърли остатъка. */
     for (const p of parts.filter(p => p.byNum && !held(p) && !doneI.has(p.i.id) && n(fulls, byT, p.t.key) === 0 && n(parts.filter(x => x.byNum), byT, p.t.key) === 1).sort((a, b) => a.t.date.localeCompare(b.t.date))){
-      const sum = r2((sums[p.i.id] || 0) + p.amt); if (sum > left(p.i) + 0.011) continue;
+      const sum = r2((sums[p.i.id] || 0) + p.amt); if (c100(sum) > c100(left(p.i))) continue;
       sums[p.i.id] = sum; auto.push(p); doneT.add(p.t.key);
     }
-    const rest = pairs.filter(p => !auto.includes(p) && !doneI.has(p.i.id) && !doneT.has(p.t.key) && (p.part ? p.amt <= left(p.i) - (sums[p.i.id] || 0) + 0.011 && n(fulls, byT, p.t.key) === 0 && n(parts, byT, p.t.key) === 1 : p.strong || (n(fulls, byI, p.i.id) === 1 && n(fulls, byT, p.t.key) === 1)));
+    const rest = pairs.filter(p => !auto.includes(p) && !doneI.has(p.i.id) && !doneT.has(p.t.key) && (p.part ? c100(p.amt) <= c100(left(p.i) - (sums[p.i.id] || 0)) && n(fulls, byT, p.t.key) === 0 && n(parts, byT, p.t.key) === 1 : p.strong || (n(fulls, byI, p.i.id) === 1 && n(fulls, byT, p.t.key) === 1)));
     rest.sort((a, b) => (b.strong - a.strong) || (a.part - b.part) || b.t.date.localeCompare(a.t.date) || a.lag - b.lag);
     return { auto: auto.map(p => ({ id: p.i.id, key: p.t.key, date: p.t.date, amount: p.amt, part: p.part })), suggest: rest.slice(0, 30).map(p => ({ id: p.i.id, key: p.t.key, date: p.t.date, cp: p.t.cp, amount: p.t.amount, strong: p.strong, part: p.part })) };
   }
@@ -194,6 +199,30 @@ const Fin = (() => {
     const due = i.due || i.date, late = dayDiff(today, due);
     return 'Здравейте,\n\nнапомняме Ви, че фактура' + (i.number ? ' № ' + i.number : '') + ' от ' + fmtDate(i.date) + ' на стойност ' + money(i.amount) + ' ' + cur + (i.paid > 0 ? ', от които остават за плащане ' + money(left(i)) + ' ' + cur + ',' : '') + ' беше с падеж ' + fmtDate(due) +
       (late > 0 ? ' и към днес е просрочена с ' + late + (late === 1 ? ' ден' : ' дни') : '') + '.\nМолим да наредите плащането. Ако вече сте платили, моля изпратете ни платежното нареждане.\n\nПоздрави,\n' + firm;
+  }
+  /* №29: контролна цифра на ЕИК (9 или 13 цифри), ЕГН и ЛНЧ (10 цифри) и формат на ДДС номера. Само за предупреждение. */
+  function idValid(e){
+    const s = String(e || '').replace(/\s/g, ''); if (!/^\d+$/.test(s) || /^0+$/.test(s)) return false;
+    const d = s.split('').map(Number), w = (ws, from) => ws.reduce((a, x, i) => a + x * d[from + i], 0);
+    const m11 = (from, w1, w2) => { let r = w(w1, from) % 11; if (r === 10){ r = w(w2, from) % 11; if (r === 10) r = 0; } return r; };
+    if (d.length === 10){
+      let r = w([2, 4, 8, 5, 10, 9, 7, 3, 6], 0) % 11; if (r === 10) r = 0;
+      const mo = d[2] * 10 + d[3], dy = d[4] * 10 + d[5], mm = mo > 40 ? mo - 40 : mo > 20 ? mo - 20 : mo, y = (mo > 40 ? 2000 : mo > 20 ? 1800 : 1900) + d[0] * 10 + d[1];
+      const egn = r === d[9] && mm >= 1 && mm <= 12 && dy >= 1 && dy <= new Date(Date.UTC(y, mm, 0)).getUTCDate();
+      return egn || w([21, 19, 17, 13, 11, 9, 7, 3, 1], 0) % 10 === d[9];
+    }
+    if (d.length !== 9 && d.length !== 13) return false;
+    if (m11(0, [1, 2, 3, 4, 5, 6, 7, 8], [3, 4, 5, 6, 7, 8, 9, 10]) !== d[8]) return false;
+    return d.length === 9 || m11(8, [2, 7, 3, 5], [4, 9, 5, 7]) === d[12];
+  }
+  const EU_VAT = /^(AT|BE|CY|CZ|DE|DK|EE|EL|ES|FI|FR|HR|HU|IE|IT|LT|LU|LV|MT|NL|PL|PT|RO|SE|SI|SK|XI)[0-9A-Z+*]{2,12}$/;
+  function vatNoValid(v){ const s = String(v || '').replace(/\s/g, '').toUpperCase(); return /^BG/.test(s) ? /^BG\d{9,10}$/.test(s) && idValid(s.slice(2)) : EU_VAT.test(s); }
+  function idWarnings(eik, vatNo){
+    const e = String(eik || '').replace(/\s/g, ''), v = String(vatNo || '').replace(/\s/g, '').toUpperCase(), out = [];
+    if (e && !idValid(e)) out.push('ЕИК не минава проверката за контролна цифра.');
+    if (v && !vatNoValid(v)) out.push('ДДС номерът не е във валиден формат (например BG123456789).');
+    else if (e.length <= 10 && v.startsWith('BG') && e && v.slice(2) !== e) out.push('ДДС номерът не съвпада с ЕИК.');
+    return out;
   }
   /* ---- издаване на фактури ---- */
   const REV = { '703': 'Услуги', '702': 'Стоки', '701': 'Продукция' }, RATES = [20, 9, 0];
@@ -224,14 +253,14 @@ const Fin = (() => {
     for (const i of items){
       if (i.type !== 'invoice' || i.pay === 'cash' || i.status === 'void') continue;
       for (const p of i.pays || []) pays.push([p.date, i, p.amount]);
-      if (i.status === 'paid' && i.paidAt && left(i) > 0.011) pays.push([i.paidAt, i, left(i)]);
+      if (i.status === 'paid' && i.paidAt && c100(left(i)) > 0) pays.push([i.paidAt, i, left(i)]);
     }
     for (const [date, i, amount] of pays.filter(x => String(x[0]).slice(0, 7) === period && x[2] > 0).sort((a, b) => a[0].localeCompare(b[0])))
       rows.push([fmtDate(date), 'Банково постъпление', i.number || '', i.party, i.inv ? i.inv.buyer.eik : '', 'Плащане по фактура' + (i.number ? ' ' + i.number : ''), '503', '411', num(amount)]);
     return rows;
   }
   function toCsv(rows){ return '﻿' + rows.map(r => r.map(c => { let s = String(c == null ? '' : c); if (/^[=+\-@\t\r]/.test(s) && !/^[-+]?\d+([.,]\d+)?$/.test(s)) s = "'" + s; return /[";\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(';')).join('\r\n'); }
-  return { CATS, DEFAULTS, PAY, STATUS, ROLES, r2, addDays, dayDiff, money, canApprove, budgetUsage, violations, forecast, aging, byCat, summary, toCsv, matchBank, dunningText, fmtDate, left, addMonths, REV, RATES, invoiceTotals, salesLedger, salesPostings };
+  return { CATS, DEFAULTS, PAY, STATUS, ROLES, RECUR_GRACE, r2, c100, idValid, vatNoValid, idWarnings, addDays, dayDiff, money, canApprove, budgetUsage, violations, forecast, aging, byCat, summary, toCsv, matchBank, dunningText, fmtDate, left, addMonths, REV, RATES, invoiceTotals, salesLedger, salesPostings };
 })();
 /*FIN-END*/
 
@@ -293,7 +322,7 @@ function rowActs(i){
   if (i.file) h += '<a class="btn small" target="_blank" rel="noopener" href="' + esc(withFirm('/api/fin/items/' + i.id + '/file')) + '">Документ</a>';
   if (i.type === 'credit'){ if (i.status === 'open' && r !== 'member') h += b('refunded', 'Върнато на клиента', 'pri'); return '<div class="acts">' + h + '</div>'; }
   if (i.type === 'invoice'){
-    if (i.inv && (i.status === 'open' || i.status === 'paid') && Fin.r2(i.amount - (i.credited || 0)) > 0.011) h += b('credit', 'Кредитно известие');
+    if (i.inv && (i.status === 'open' || i.status === 'paid') && Fin.c100(i.amount - (i.credited || 0)) > 0) h += b('credit', 'Кредитно известие');
     if (i.status === 'open') h += b('paid', i.paid > 0 ? 'Получен остатъкът' : 'Получено плащане', 'pri') + b('part', 'Частично плащане') + (Fin.dayDiff(S.st.today, i.due || i.date) > 0 ? b('dun', 'Копирай напомняне') : '') + (i.paid > 0 ? '' : b('void', S.confirm === 'void' + i.id ? 'Потвърди анулирането' : 'Анулирай', S.confirm === 'void' + i.id ? 'bad' : ''));
     else if (i.status === 'paid') h += b('reopen-inv', 'Върни като неплатена');
   } else {
@@ -328,7 +357,8 @@ const sellerVat = () => !!(S.st.settings.seller && S.st.settings.seller.vatNo);
 function customers(){ const m = new Map(); for (const i of S.st.items) if (i.inv && !m.has(i.party)) m.set(i.party, i.inv.buyer); return m; }
 function blankIssue(){ return { party: '', eik: '', vatNo: '', address: '', mol: '', date: S.st.today, due: Fin.addDays(S.st.today, 14), rate: sellerVat() ? 20 : 0, vatNote: '', pay: 'bank', rev: '703', note: '', lines: [{ name: '', qty: '1', unit: 'бр.', price: '' }] }; }
 function issueTotals(){ const d = S.issue, t = Fin.invoiceTotals(d.lines.map(l => ({ qty: pn(l.qty), price: pn(l.price) })), d.rate);
-  return { t, html: 'Данъчна основа: <b>' + m(t.net) + '</b> · ДДС ' + d.rate + '%: <b>' + m(t.vat) + '</b> · Сума за плащане: <b>' + m(t.total) + '</b>' }; }
+  const warn = Fin.idWarnings(d.eik, d.vatNo).map(x => '<div class="note warn">Получател: ' + esc(x) + ' Проверете преди издаване.</div>').join('');
+  return { t, html: 'Данъчна основа: <b>' + m(t.net) + '</b> · ДДС ' + d.rate + '%: <b>' + m(t.vat) + '</b> · Сума за плащане: <b>' + m(t.total) + '</b>' + warn }; }
 function collectIssue(){
   const f = $('issue-form'), d = S.issue; if (!f || !d) return;
   for (const k of ['party', 'eik', 'vatNo', 'address', 'mol', 'date', 'due', 'pay', 'rev', 'vatNote', 'note', 'freq', 'day', 'next', 'end', 'mode', 'dueDays']) if (f.elements[k]) d[k] = f.elements[k].value;
@@ -343,7 +373,7 @@ function issueForm(){
     '<label>Получател<input name="party" list="customers" maxlength="120" value="' + v('party') + '" required autocomplete="off"></label><datalist id="customers">' + [...customers().keys()].map(c => '<option value="' + esc(c) + '">').join('') + '</datalist>' +
     '<label>ЕИК<input name="eik" inputmode="numeric" maxlength="15" value="' + v('eik') + '"></label><label>ДДС номер<input name="vatNo" maxlength="20" value="' + v('vatNo') + '"></label><label>МОЛ<input name="mol" maxlength="80" value="' + v('mol') + '"></label>' +
     '<label class="full">Адрес<input name="address" maxlength="200" value="' + v('address') + '"></label>' +
-    (d.recur ? '<label>Повтаряне<select name="freq">' + [['month', 'Всеки месец'], ['quarter', 'Всяко тримесечие'], ['year', 'Всяка година']].map(o => '<option value="' + o[0] + '"' + (d.freq === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select></label><label>Първо издаване<input name="next" type="date" value="' + v('next') + '" min="' + S.st.today + '" required></label><label>Ден от месеца (1 до 28)<input name="day" inputmode="numeric" maxlength="2" value="' + v('day') + '"></label><label>Срок за плащане, дни<input name="dueDays" inputmode="numeric" maxlength="2" value="' + v('dueDays') + '"></label><label>Краен срок (по избор)<input name="end" type="date" value="' + v('end') + '"></label><label>Как се издава<select name="mode"><option value="confirm"' + (d.mode === 'auto' ? '' : ' selected') + '>Напомня ми, издавам с един клик</option><option value="auto"' + (d.mode === 'auto' ? ' selected' : '') + '>Издава се автоматично</option></select></label>'
+    (d.recur ? '<label>Повтаряне<select name="freq">' + [['month', 'Всеки месец'], ['quarter', 'Всяко тримесечие'], ['year', 'Всяка година']].map(o => '<option value="' + o[0] + '"' + (d.freq === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select></label><label>Първо издаване<input name="next" type="date" value="' + v('next') + '" min="' + S.st.today + '" required></label><label>Ден от месеца (1 до 31; 31 е последният ден)<input name="day" inputmode="numeric" maxlength="2" value="' + v('day') + '"></label><label>Срок за плащане, дни<input name="dueDays" inputmode="numeric" maxlength="2" value="' + v('dueDays') + '"></label><label>Краен срок (по избор)<input name="end" type="date" value="' + v('end') + '"></label><label>Как се издава<select name="mode"><option value="confirm"' + (d.mode === 'auto' ? '' : ' selected') + '>Напомня ми, издавам с един клик</option><option value="auto"' + (d.mode === 'auto' ? ' selected' : '') + '>Издава се автоматично</option></select></label>'
       : '<label>Дата<input name="date" type="date" value="' + v('date') + '" required></label><label>Падеж<input name="due" type="date" value="' + v('due') + '"></label>') +
     '<label>Плащане' + sel('pay', [['bank', 'По банков път'], ['cash', 'В брой']], d.pay) + '</label><label>Вид приход' + sel('rev', Object.entries(Fin.REV).map(([k, n]) => [k, n + ' (' + k + ')']), d.rev) + '</label>' +
     (vat ? '<label>ДДС ставка' + sel('rate', Fin.RATES.map(r => [r, r + '%']), d.rate) + '</label><label>Основание при 0%<input name="vatNote" maxlength="120" placeholder="напр. чл. 21, ал. 2 от ЗДДС" value="' + v('vatNote') + '"></label>'
@@ -359,7 +389,7 @@ function issueForm(){
 function blankCredit(inv){ return { id: inv.id, date: S.st.today, reason: '', note: '', lines: inv.inv.lines.map(l => ({ name: l.name, qty: String(l.qty).replace('.', ','), unit: l.unit, price: String(l.price).replace('.', ',') })) }; }
 function creditTotals(){
   const d = S.credit, inv = S.st.items.find(i => i.id === d.id), t = Fin.invoiceTotals(d.lines.map(l => ({ qty: pn(l.qty), price: pn(l.price) })), inv.inv.rate), cap = Fin.r2(inv.amount - (inv.credited || 0));
-  return { t, cap, html: 'Данъчна основа: <b>' + m(t.net) + '</b> · ДДС ' + inv.inv.rate + '%: <b>' + m(t.vat) + '</b> · Кредитно известие: <b>' + m(t.total) + '</b>' + (t.total > cap + 0.011 ? '<div class="note crit">Над останалото по фактурата (' + m(cap) + ').</div>' : '') };
+  return { t, cap, html: 'Данъчна основа: <b>' + m(t.net) + '</b> · ДДС ' + inv.inv.rate + '%: <b>' + m(t.vat) + '</b> · Кредитно известие: <b>' + m(t.total) + '</b>' + (Fin.c100(t.total) > Fin.c100(cap) ? '<div class="note crit">Над останалото по фактурата (' + m(cap) + ').</div>' : '') };
 }
 function collectCredit(){
   const f = $('credit-form'), d = S.credit; if (!f || !d) return;
@@ -380,14 +410,14 @@ function creditForm(){
     '<div class="full acts"><button class="btn pri" type="submit">Издай кредитното известие</button><button class="btn" type="button" data-act="cancel">Отказ</button></div>' +
     '<p class="full dim">Известието получава следващия номер от същата поредица като фактурите. Фактурата остава непроменена, но дължимото по нея намалява.' + (inv.status === 'paid' || inv.paid > 0 ? ' Ако клиентът вече е платил, ще Ви покажем колко да му върнете.' : '') + '</p></form>';
 }
-function blankRecur(){ const t = S.st.today; return Object.assign(blankIssue(), { recur: true, rid: '', freq: 'month', day: String(Math.min(28, +t.slice(8, 10))), next: Fin.addMonths(t, 1, Math.min(28, +t.slice(8, 10))), end: '', mode: 'confirm', dueDays: '14' }); }
+function blankRecur(){ const t = S.st.today; return Object.assign(blankIssue(), { recur: true, rid: '', freq: 'month', day: String(+t.slice(8, 10)), next: Fin.addMonths(t, 1, +t.slice(8, 10)), end: '', mode: 'confirm', dueDays: '14' }); }
 const FREQ = { month: 'всеки месец', quarter: 'всяко тримесечие', year: 'всяка година' };
 function vRecur(){
   const list = items('recur'); if (!list.length) return '';
   const b = (a, t, id, cl) => '<button class="btn small ' + (cl || '') + '" type="button" data-act="' + a + '" data-id="' + id + '">' + t + '</button>';
   return '<div class="card scroll"><h2>Повтарящи се фактури</h2><table><thead><tr><th>Клиент</th><th>График</th><th>Следваща</th><th class="num">Сума</th><th>Състояние</th><th></th></tr></thead><tbody>' +
-    list.map(i => { const due = i.status === 'active' && i.next <= S.st.today;
-      return '<tr><td>' + esc(i.party) + '<div class="dim">' + (i.mode === 'auto' ? 'издава се автоматично' : 'с потвърждение') + (i.count ? ' · издадени ' + i.count + (i.lastNumber ? ', последна № ' + esc(i.lastNumber) : '') : '') + '</div>' + (i.error ? '<div class="note crit">' + esc(i.error) + '</div>' : '') + '</td><td>' + FREQ[i.freq] + ', ' + i.day + '-о число</td><td>' + (i.status === 'done' ? '' : dm(i.next)) + (i.end ? '<div class="dim">до ' + dm(i.end) + '</div>' : '') + '</td><td class="num">' + m(i.amount) + '</td>' +
+    list.map(i => { const due = i.status === 'active' && i.next <= S.st.today, late = due && i.mode === 'auto' && Fin.dayDiff(S.st.today, i.next) > Fin.RECUR_GRACE;
+      return '<tr><td>' + esc(i.party) + '<div class="dim">' + (i.mode === 'auto' ? 'издава се автоматично' : 'с потвърждение') + (i.count ? ' · издадени ' + i.count + (i.lastNumber ? ', последна № ' + esc(i.lastNumber) : '') : '') + '</div>' + (i.error ? '<div class="note crit">' + esc(i.error) + '</div>' : '') + (late ? '<div class="note warn">Автоматичното издаване за ' + dm(i.next) + ' е пропуснато. Издайте фактурата с днешна дата или пропуснете периода.</div>' : '') + '</td><td>' + FREQ[i.freq] + ', ' + (i.day >= 31 ? 'последния ден от месеца' : i.day + '-о число') + '</td><td>' + (i.status === 'done' ? '' : dm(i.next)) + (i.end ? '<div class="dim">до ' + dm(i.end) + '</div>' : '') + '</td><td class="num">' + m(i.amount) + '</td>' +
         '<td><span class="pill ' + (due ? 'crit' : i.status === 'active' ? 'good' : '') + '">' + (due ? 'Чака издаване' : Fin.STATUS[i.status]) + '</span></td><td><div class="acts">' +
         (due ? b('recur-issue', 'Издай сега', i.id, 'pri') + b('recur-skip', 'Пропусни', i.id) : '') + (i.status === 'active' ? b('recur-pause', 'Пауза', i.id) : i.status === 'paused' ? b('recur-resume', 'Поднови', i.id) : '') + (i.status !== 'done' ? b('recur-edit', 'Редактирай', i.id) : '') + b('recur-del', S.confirm === i.id ? 'Потвърди изтриването' : 'Изтрий', i.id, 'bad') + '</div></td></tr>'; }).join('') + '</tbody></table></div>';
 }
@@ -475,7 +505,7 @@ function vTeam(){
     '<section class="card"><h2>Правила и наличност</h2><form class="form" id="set-form" novalidate><label>Наличност по сметките (' + S.st.cur + ')<input name="balance" inputmode="decimal" value="' + String(set.balance).replace('.', ',') + '"></label><label>Към дата<input name="balanceDate" type="date" value="' + esc(set.balanceDate || S.st.today) + '"></label>' +
     '<label>Лимит на одобряващия (0 = без лимит)<input name="approverLimit" inputmode="decimal" value="' + String(set.approverLimit).replace('.', ',') + '"></label><label>Документ се изисква над сума<input name="receiptOver" inputmode="decimal" value="' + String(set.receiptOver).replace('.', ',') + '"></label>' +
     '<label class="full">Категории, по една на ред<textarea name="cats" rows="6">' + esc(set.cats.join('\n')) + '</textarea></label>' +
-    '<h2 class="full" style="margin:8px 0 0">Данни на фирмата за фактурите</h2>' + [['s_name', 'Наименование по регистрация (излиза във фактурите)', sl.name || S.st.firm.name], ['s_eik', 'ЕИК', sl.eik || S.st.firm.eik], ['s_vatNo', 'ДДС номер (празно, ако няма регистрация)', sl.vatNo], ['s_mol', 'МОЛ', sl.mol], ['s_address', 'Адрес', sl.address], ['s_iban', 'IBAN', sl.iban], ['s_bank', 'Банка', sl.bank], ['s_bic', 'BIC', sl.bic]].map(x => '<label>' + x[1] + '<input name="' + x[0] + '" maxlength="200" value="' + esc(x[2] || '') + '"></label>').join('') +
+    '<h2 class="full" style="margin:8px 0 0">Данни на фирмата за фактурите</h2>' + Fin.idWarnings(sl.eik || S.st.firm.eik, sl.vatNo).map(x => '<div class="note warn full">Данни на фирмата: ' + esc(x) + '</div>').join('') + [['s_name', 'Наименование по регистрация (излиза във фактурите)', sl.name || S.st.firm.name], ['s_eik', 'ЕИК', sl.eik || S.st.firm.eik], ['s_vatNo', 'ДДС номер (празно, ако няма регистрация)', sl.vatNo], ['s_mol', 'МОЛ', sl.mol], ['s_address', 'Адрес', sl.address], ['s_iban', 'IBAN', sl.iban], ['s_bank', 'Банка', sl.bank], ['s_bic', 'BIC', sl.bic]].map(x => '<label>' + x[1] + '<input name="' + x[0] + '" maxlength="200" value="' + esc(x[2] || '') + '"></label>').join('') +
     '<label>Номер на следващата фактура<input name="invNext" inputmode="numeric" value="' + (set.invNext || 1) + '"></label><div class="full acts"><button class="btn pri" type="submit">Запази правилата</button></div></form></section>';
 }
 function render(){
@@ -485,7 +515,7 @@ function render(){
   $('foot').innerHTML = '<span>' + esc(st.me.email) + ' · ' + Fin.ROLES[st.me.office ? 'accountant' : r] + '</span>' + (st.me.office ? '<a href="/">Към счетоводната част</a>' : '<a href="/security">Сигурност</a> <a href="#" data-act="logout">Изход</a>');
   const pi = S.print && st.items.find(i => i.id === S.print && i.inv);
   const body = pi ? invoiceDoc(pi) : S.view === 'dash' ? vDash() : S.view === 'budget' ? vBudget() : S.view === 'team' ? vTeam() : vList(S.view);
-  $('main').innerHTML = (st.me.office ? '<div class="note info">Преглеждате финансите на фирмата като счетоводител.</div>' : '') + (S.msg ? '<div class="note ' + S.msg.cls + '" role="status">' + esc(S.msg.text) + '</div>' : '') + body;
+  $('main').innerHTML = (st.me.verified === false ? '<div class="note warn" role="status">Потвърдете имейла си с връзката, която Ви изпратихме. Дотогава FinBridge не изпраща писма от Ваше име. <button class="btn small" data-act="verify-resend">Изпрати писмото отново</button></div>' : '') + (st.me.office ? '<div class="note info">Преглеждате финансите на фирмата като счетоводител.</div>' : '') + (S.msg ? '<div class="note ' + S.msg.cls + '" role="status">' + esc(S.msg.text) + '</div>' : '') + body;
 }
 async function go(v){ S.view = v; if (location.hash.slice(1) !== v) history.replaceState(null, '', '#' + v); S.form = null; S.reject = null; S.pay = null; S.issue = null; S.credit = null; S.print = null; S.confirm = null; S.msg = null; S.filter = { status: '', q: '' };
   /* Разделът с формите за екипа се рисува веднъж, след зареждането, за да не се губи въведеното. */
@@ -540,6 +570,7 @@ document.addEventListener('click', e => {
   const a = el.dataset.act, id = el.dataset.id, it = id && S.st.items.find(i => i.id === id);
   if (a !== 'del' && a !== 'void' && a !== 'del-user' && a !== 'recur-del') S.confirm = null;
   switch (a){
+    case 'verify-resend': return act(() => api('POST', '/api/verify/resend'), 'Изпратихме ново писмо за потвърждение.');
     case 'logout': e.preventDefault(); return api('POST', '/api/logout').then(() => { location.href = '/login'; });
     case 'new': S.form = { type: el.dataset.type, data: null }; S.reject = null; S.pay = null; S.issue = null; S.credit = null; if (S.view !== 'dash' || el.dataset.type !== 'expense') S.view = el.dataset.type; S.msg = null; return render();
     case 'edit': S.form = { type: it.type, data: it }; S.reject = null; S.pay = null; return render();

@@ -17,7 +17,7 @@ const PW='parola-parola-1';
   assert.deepEqual((await A('GET','/api/users')).body.map(u=>u.email),['a@test.bg']);assert.deepEqual((await A('GET','/api/fin/users?firm=f1')).body.map(u=>[u.email,u.role,u.name]),[['shef@firma.test','owner','Шефът'],['fin@firma.test','approver','Финансист'],['ivan@firma.test','member','Иван']]);
   ok('the accounting office opens a firm\'s finances and creates owner, approver and employee logins; they stay out of the office team list');
   for(const [c,e] of [[own,'shef'],[apr,'fin'],[mem,'ivan']])assert.equal((await c('POST','/api/login',{email:e+'@firma.test',password:PW})).status,200);
-  r=await own('GET','/');assert(r.status===200&&r.body.includes('FinBridge Финанси')&&!r.body.includes('CORE-START'));assert.deepEqual((await own('GET','/api/me')).body,{company:true,email:'shef@firma.test',role:'owner'});
+  r=await own('GET','/');assert(r.status===200&&r.body.includes('FinBridge Финанси')&&!r.body.includes('CORE-START'));assert.deepEqual((await own('GET','/api/me')).body,{company:true,email:'shef@firma.test',role:'owner',verified:true});
   for(const u of ['/api/firms','/api/inbox','/api/backup','/api/users','/api/period/f1/2026-10','/api/kv/rules','/api/questions'])assert.equal((await own('GET',u)).status,403,u);
   assert.equal((await own('PUT','/api/firms/f9',{data:{name:'x'}})).status,403);assert.equal((await own('POST','/api/ai',{prompt:'x'})).status,403);
   r=await own('GET','/api/fin/state?firm=f2');assert.equal(r.body.firm.name,'Фирма Едно');assert.equal((await Bo('GET','/api/fin/state?firm=f2')).status,404);assert.equal((await Bo('GET','/api/fin/state?firm=f1')).body.firm.name,'Чужда');
