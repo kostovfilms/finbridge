@@ -4,9 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FinBridge</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Manrope:wght@600;700;800&display=swap" rel="stylesheet">
+<link href="/fonts/fonts.css" rel="stylesheet">
 <style>
 /* Layout idea: fixed left rail for the five work steps, one dense working surface on the right; state is carried by pills and a left stripe on rows. */
 :root{
@@ -1214,7 +1212,7 @@ function render(){
   $('nav').innerHTML = VIEWS.map(([id, label]) => '<a href="#' + id + '"' + (id === v ? ' class="on" aria-current="page"' : '') + '>' + label +
     (id in counts ? '<span class="count' + (counts[id] ? '' : ' zero') + '">' + counts[id] + '</span>' : '') + '</a>').join('');
   $('foot').innerHTML = '<div>' + (S.mode === 'db' ? (window.FB ? 'Данните се пазят на сървъра.' : 'Данните се пазят в този артефакт.') : S.mode === 'mem' ? 'Временен режим, без запазване.' : 'Свързване…') + '</div><div>Разчитане с Claude: ' + (sample ? (imgOK ? 'включено' : 'само текст') : 'няма') + '</div>' +
-    (window.FB && FB.me ? '<div>' + esc(FB.me.office) + '<br>' + esc(FB.me.email) + '</div><div><button class="btn small" data-act="logout">Изход</button></div>' : '');
+    (window.FB && FB.me ? '<div>' + esc(FB.me.office) + '<br>' + esc(FB.me.email) + '</div><div><a href="/account">Сигурност и журнал</a></div><div><button class="btn small" data-act="logout">Изход</button></div>' : '');
   $('main').innerHTML = {clients: vClients, reconcile: vReconcile, inbox: vInbox, reminders: vReminders, export: vExport, rules: vRules, office: vOffice}[v]();
 }
 function go(h){ if (location.hash === '#' + h) render(); else location.hash = h; }

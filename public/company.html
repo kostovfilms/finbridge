@@ -264,7 +264,7 @@ const T = {
 };
 const PILL = { submitted: 'warn', approved: 'info', rejected: 'crit', paid: 'good', open: 'warn', void: '', credited: '' };
 
-async function load(){ S.st = await api('GET', '/api/fin/state'); if (role() === 'member' && S.view === 'dash') S.view = 'expense'; }
+async function load(){ await api('POST', '/api/fin/refresh').catch(() => null); S.st = await api('GET', '/api/fin/state'); if (role() === 'member' && S.view === 'dash') S.view = 'expense'; }
 async function act(fn, okText){
   if (S.busy) return; S.busy = true; S.msg = null;
   try { await fn(); await load(); if (okText) S.msg = { cls: 'good', text: okText }; } catch (e) { S.msg = { cls: 'crit', text: e.message }; }
@@ -393,7 +393,12 @@ function vCredits(){
 }
 function invoiceDoc(i){
   const v = i.inv, cr = i.type === 'credit', ng = x => cr ? '-' + x : x, row = (k, x) => x ? k + ': ' + esc(x) + '<br>' : '', who = (name, p) => '<b>' + esc(name) + '</b><br>' + row('ЕИК', p.eik) + row('ДДС №', p.vatNo) + row('Адрес', p.address) + row('МОЛ', p.mol);
-  return '<div class="acts noprint"><button class="btn pri" type="button" data-act="do-print">Печат или запис като PDF</button><button class="btn" type="button" data-act="print-close">Назад към фактурите</button></div>' +
+  const sent = (i.log || []).filter(l => l.what === 'sent').pop();
+  return '<div class="acts noprint"><button class="btn pri" type="button" data-act="do-print">Печат или запис като PDF</button>' + (S.st.mail && i.status !== 'void' ? '<button class="btn" type="button" data-act="mail-open" data-id="' + esc(i.id) + '">Изпрати по имейл</button>' : '') + '<button class="btn" type="button" data-act="print-close">Назад към фактурите</button></div>' +
+    (sent ? '<div class="note noprint">Изпратена до ' + esc(sent.note) + ' на ' + dm(sent.at.slice(0, 10)) + '.</div>' : '') +
+    (S.mail === i.id ? '<form class="card form noprint" id="mail-form" data-id="' + esc(i.id) + '"><label class="full">Имейл на получателя<input type="email" name="to" required maxlength="200" value="' + esc(i.mailTo || '') + '" autocomplete="email"></label>' +
+      '<label class="full">Съобщение (по желание)<textarea name="message" rows="3" maxlength="2000" placeholder="Здравейте, изпращаме Ви фактурата."></textarea></label>' +
+      '<div class="full acts"><button class="btn pri" type="submit">Изпрати</button><button class="btn" type="button" data-act="mail-close">Отказ</button></div></form>' : '') +
     (cr && i.refund > 0 ? '<div class="note warn noprint">Клиентът е платил повече от новата дължима сума. Върнете му ' + m(i.refund) + ' и отбележете връщането в списъка с кредитни известия.</div>' : '') + '<article class="card doc" id="invoice-doc"><div class="head"><div><h1>' + (cr ? 'КРЕДИТНО ИЗВЕСТИЕ' : 'ФАКТУРА') + '</h1><div>№ <b>' + esc(i.number) + '</b> от ' + dm(i.date) + '</div></div><div><b>' + (i.status === 'void' ? 'АНУЛИРАНА' : 'ОРИГИНАЛ') + '</b></div></div>' +
     '<div class="two"><section><h2>Получател</h2>' + who(i.party, v.buyer) + '</section><section><h2>Доставчик</h2>' + who(v.seller.name, v.seller) + '</section></div>' +
     '<table><thead><tr><th>№</th><th>Наименование</th><th>Мярка</th><th class="num">Количество</th><th class="num">Ед. цена</th><th class="num">Стойност</th></tr></thead><tbody>' +
@@ -477,7 +482,7 @@ function render(){
   const st = S.st, r = role(), wait = t => st.items.filter(i => i.type === t && i.status === 'submitted').length;
   $('firm').textContent = st.firm.name; if (!S.form){ S.scanFile = null; S.scanSeq++; } $('snap').classList.toggle('off', !!(S.form || S.issue || S.credit || S.print || S.pay || S.reject));
   $('nav').innerHTML = VIEWS.filter(v => v[2](r)).map(v => '<a href="#' + v[0] + '" data-view="' + v[0] + '"' + (S.view === v[0] ? ' class="on" aria-current="page"' : '') + '>' + v[1] + (wait(v[0]) && r !== 'member' ? '<span class="count">' + wait(v[0]) + '</span>' : '') + '</a>').join('');
-  $('foot').innerHTML = '<span>' + esc(st.me.email) + ' · ' + Fin.ROLES[st.me.office ? 'accountant' : r] + '</span>' + (st.me.office ? '<a href="/">Към счетоводната част</a>' : '<a href="#" data-act="logout">Изход</a>');
+  $('foot').innerHTML = '<span>' + esc(st.me.email) + ' · ' + Fin.ROLES[st.me.office ? 'accountant' : r] + '</span>' + (st.me.office ? '<a href="/">Към счетоводната част</a>' : '<a href="/account">Сигурност' + (r === 'owner' ? ' и журнал' : '') + '</a> <a href="#" data-act="logout">Изход</a>');
   const pi = S.print && st.items.find(i => i.id === S.print && i.inv);
   const body = pi ? invoiceDoc(pi) : S.view === 'dash' ? vDash() : S.view === 'budget' ? vBudget() : S.view === 'team' ? vTeam() : vList(S.view);
   $('main').innerHTML = (st.me.office ? '<div class="note info">Преглеждате финансите на фирмата като счетоводител.</div>' : '') + (S.msg ? '<div class="note ' + S.msg.cls + '" role="status">' + esc(S.msg.text) + '</div>' : '') + body;
@@ -555,7 +560,9 @@ document.addEventListener('click', e => {
     case 'credit': S.credit = blankCredit(it); S.form = S.reject = S.pay = S.issue = S.print = null; S.view = 'invoice'; S.msg = null; return render();
     case 'refunded': return act(() => status(id, 'paid'), 'Отбелязано като върнато на клиента.');
     case 'print': S.print = id; S.msg = null; return render();
-    case 'print-close': S.print = null; return render();
+    case 'print-close': S.print = null; S.mail = null; return render();
+    case 'mail-open': S.mail = id; return render();
+    case 'mail-close': S.mail = null; return render();
     case 'do-print': return window.print();
     case 'approve': return act(() => status(id, 'approved'), 'Одобрено.' + (it.file && it.type === 'expense' ? ' Документът е изпратен на счетоводителя.' : ''));
     case 'reject': S.reject = id; S.form = null; S.pay = null; return render();
@@ -574,6 +581,10 @@ document.addEventListener('click', e => {
 });
 document.addEventListener('submit', e => {
   e.preventDefault(); const f = e.target, v = Object.fromEntries(new FormData(f).entries());
+  if (f.id === 'mail-form'){
+    const id = f.dataset.id;
+    return act(async () => { await api('POST', '/api/fin/invoices/' + id + '/send', { to: v.to, message: v.message }); S.mail = null; }, 'Изпратено до ' + v.to + '.');
+  }
   if (f.id === 'item-form'){
     const type = f.dataset.type, id = f.dataset.id, file = id ? f.elements.file.files[0] : (S.scanFile || f.elements.file.files[0]); delete v.file;
     return act(async () => {

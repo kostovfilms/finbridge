@@ -12,7 +12,7 @@ const PW='parola-parola-1';
   const sset=(c,seller)=>c('PUT','/api/fin/settings',{data:{balance:0,cats:[],seller}});
   assert.equal((await sset(own,{eik:'489280014',vatNo:'bg489280014',address:'София, бул. Витоша 5',mol:'Мария Петрова',iban:'bg80 bnbg 9661 1020 3456 78'})).status,200);
   const issue=(c,data)=>c('POST','/api/fin/invoices',{data}),base={party:'Клиент ООД',eik:'507081376',address:'Варна',mol:'Иван Иванов',rate:20,pay:'bank',lines:[{name:'Консултация',qty:10,unit:'час',price:100},{name:'Пътни',qty:1,unit:'бр.',price:50}]};
-  const state=async c=>(await c('GET','/api/fin/state')).body,item=async(c,id)=>(await state(c)).items.find(i=>i.id===id);
+  const state=async c=>{await c('POST','/api/fin/refresh');return (await c('GET','/api/fin/state')).body},item=async(c,id)=>(await state(c)).items.find(i=>i.id===id);
   const credit=(c,id,data)=>c('POST','/api/fin/invoices/'+id+'/credit',{data});
 
   /* ---- кредитни известия ---- */
