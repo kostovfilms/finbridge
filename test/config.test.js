@@ -9,8 +9,9 @@ for(const f of ['render.yaml','render.paid.yaml.example']){
   assert.equal(L.filter(l=>/^\s{4}autoDeployTrigger:\s*'?off'?\s*$/.test(l)).length,1,f+': точно един autoDeployTrigger: off на ниво услуга');
   assert(!L.some(l=>/autoDeploy\s*:/.test(l)),f+': без остарялото autoDeploy');
   assert(!L.some(l=>/autoDeployTrigger:\s*'?(commit|checksPass)/.test(l)),f+': без друго правило за качване');
+  for(const k of ['BASE_URL','TOTP_KEY','ALERT_EMAIL','SMTP_PASS'])assert(L.some(l=>l.trim()==='- key: '+k),f+': таблото пита за '+k);
 }
-ok('render.yaml and the paid example turn automatic deploys off');
+ok('render.yaml and the paid example turn automatic deploys off and ask for BASE_URL, TOTP_KEY and ALERT_EMAIL');
 
 const ci=live(R('.github/workflows/test.yml')).join('\n');
 assert(/- run: npm test\b/.test(ci),'CI пуска npm test');
