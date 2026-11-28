@@ -12,6 +12,8 @@ services:
     buildCommand: "true"
     startCommand: npm start
     healthCheckPath: /healthz
+    # Без автоматично качване при промяна в main: собственикът качва на ръка от таблото на Render.
+    autoDeployTrigger: 'off'
     envVars:
       - key: NODE_VERSION
         value: "22"
@@ -28,6 +30,14 @@ services:
       - key: SMTP_PASS
         sync: false
       - key: SMTP_FROM
+        sync: false
+      - key: SMTP_SECURE
+        value: "true"
+      - key: BASE_URL
+        sync: false
+      - key: TOTP_KEY
+        sync: false
+      - key: ALERT_EMAIL
         sync: false
     disk:
       name: finbridge-data

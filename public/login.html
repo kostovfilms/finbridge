@@ -11,41 +11,61 @@ button{font:inherit;font-weight:600;border:0;border-radius:8px;padding:10px;back
 .link{background:none;color:var(--accent);padding:0;font-weight:400;text-align:left}.err{color:var(--crit);min-height:1.4em;font-size:14px}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 </style></head><body><main>
 <h1>Fin<span>Bridge</span></h1>
+<p id="lead" hidden></p>
 <form id="f" novalidate>
   <label id="kind-row" hidden>Регистрирам<select id="kind"><option value="office">Счетоводна кантора</option><option value="company">Фирма (финансово управление)</option></select></label>
   <label id="office-row" hidden><span id="office-label">Име на кантората</span><input id="office" name="office" autocomplete="organization"></label>
   <label>Имейл<input id="email" name="email" type="email" autocomplete="username" ></label>
+  <label id="name-row" hidden>Вашето име<input id="name" name="name" autocomplete="name" maxlength="80"></label>
   <label>Парола<input id="password" name="password" type="password" autocomplete="current-password" ></label>
-  <label id="code-row" hidden>Код от приложението за удостоверяване<input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"></label>
+  <label id="code-row" hidden>Код от приложението или резервен код<input id="code" name="code" inputmode="text" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="one-time-code" maxlength="20"></label>
   <div class="err" id="err" role="alert"></div>
   <button id="go" type="submit">Вход</button>
   <button class="link" id="swap" type="button" {{SIGNUP}}>Нова кантора или фирма? Създайте акаунт</button>
   <button class="link" id="forgot" type="button">Забравена парола?</button>
 </form></main>
 <script>
-let mode = location.pathname === '/reset' ? 'reset' : 'login'; const $ = id => document.getElementById(id);
+let mode = location.pathname === '/reset' ? 'reset' : location.pathname === '/invite' ? 'invite' : 'login'; const $ = id => document.getElementById(id);
+/* Жетонът от връзката се пази в паметта и се маха от адреса, за да не остане в историята. */
+const token = location.hash.slice(1); if (mode === 'invite' || mode === 'reset') history.replaceState(null, '', location.pathname);
 const row = id => $(id).closest('label');
 function show(){
-  $('office-row').hidden = $('kind-row').hidden = mode !== 'register'; $('office-label').textContent = $('kind').value === 'company' ? 'Име на фирмата' : 'Име на кантората'; row('email').hidden = mode === 'reset'; row('password').hidden = mode === 'forgot';
-  $('go').textContent = {login: 'Вход', register: 'Създай акаунт', forgot: 'Изпрати връзка за нова парола', reset: 'Запази новата парола'}[mode];
+  $('office-row').hidden = $('kind-row').hidden = mode !== 'register'; $('office-label').textContent = $('kind').value === 'company' ? 'Име на фирмата' : 'Име на кантората'; row('email').hidden = mode === 'reset'; row('password').hidden = mode === 'forgot'; $('name-row').hidden = mode !== 'invite'; $('email').readOnly = mode === 'invite';
+  $('go').textContent = {login: 'Вход', register: 'Създай акаунт', forgot: 'Изпрати връзка за нова парола', reset: 'Запази новата парола', invite: 'Приеми поканата'}[mode];
   $('swap').textContent = mode === 'login' ? 'Нова кантора или фирма? Създайте акаунт' : 'Към вход'; $('forgot').hidden = mode !== 'login';
-  row('password').firstChild.textContent = mode === 'reset' ? 'Нова парола (поне 10 знака)' : 'Парола';
-  $('password').autocomplete = mode === 'login' ? 'current-password' : 'new-password'; $('err').textContent = ''; $('err').style.color = '';
+  row('password').firstChild.textContent = mode === 'reset' ? 'Нова парола (поне 10 знака)' : mode === 'invite' ? 'Изберете парола (поне 10 знака)' : 'Парола';
+  $('password').autocomplete = mode === 'login' ? 'current-password' : 'new-password'; $('err').textContent = ''; $('err').style.color = ''; $('code-row').hidden = true; $('code').value = '';
 }
-$('swap').onclick = () => { $('code-row').hidden = true; $('code').value = ''; if (mode === 'reset') return location.href = '/login'; mode = mode === 'login' ? 'register' : 'login'; show(); };
+$('swap').onclick = () => { if (mode === 'reset' || mode === 'invite') return location.href = '/login'; mode = mode === 'login' ? 'register' : 'login'; show(); };
 $('kind').onchange = show;
 $('forgot').onclick = () => { mode = 'forgot'; show(); };
 $('f').onsubmit = async e => { e.preventDefault(); $('err').textContent = ''; $('go').disabled = true;
-  const url = {login: '/api/login', register: '/api/register', forgot: '/api/forgot', reset: '/api/reset'}[mode];
+  const url = {login: '/api/login', register: '/api/register', forgot: '/api/forgot', reset: '/api/reset', invite: '/api/invite/accept'}[mode];
   try { const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', 'x-fb': '1' },
-      body: JSON.stringify({ kind: $('kind').value, office: $('office').value, email: $('email').value, password: $('password').value, code: $('code').value, token: location.hash.slice(1) }) });
+      body: JSON.stringify({ kind: $('kind').value, office: $('office').value, email: $('email').value, name: $('name').value, password: $('password').value, code: $('code').value, token }) });
     const j = await r.json().catch(() => ({}));
-    if (j.error === 'need_code'){ $('code-row').hidden = false; $('code').focus(); }
-    if (r.ok && (mode === 'login' || mode === 'register')) return location.href = '/';
+    if (r.ok && (mode === 'login' || mode === 'register' || mode === 'invite')) return location.href = '/';
     if (r.ok && mode === 'reset'){ mode = 'login'; history.replaceState(null, '', '/login'); show(); $('err').style.color = 'inherit'; $('err').textContent = 'Паролата е сменена. Влезте с новата.'; }
     else if (r.ok && mode === 'forgot'){ $('err').style.color = 'inherit'; $('err').textContent = j.mail ? 'Ако има акаунт с този имейл, изпратихме връзка за нова парола.' : 'На този сървър не е настроен имейл. Обърнете се към администратора за смяна на паролата.'; }
-    else $('err').textContent = j.message || 'Неуспешно.'; }
+    else { if (j.error === 'totp_required' || j.error === 'bad_code'){ $('code-row').hidden = false; $('code').focus(); } $('err').textContent = j.message || 'Неуспешно.'; } }
   catch (x) { $('err').textContent = 'Няма връзка със сървъра.'; }
   $('go').disabled = false; };
 show();
+if (mode === 'invite'){
+  $('go').disabled = true;
+  fetch('/api/invite/info', { method: 'POST', headers: { 'content-type': 'application/json', 'x-fb': '1' }, body: JSON.stringify({ token }) })
+    .then(r => r.json().then(j => ({ ok: r.ok, j }), () => ({ ok: r.ok, j: {} })))
+    .then(({ ok, j }) => { if (!ok){ $('err').textContent = j.message || 'Поканата не е валидна.'; return; }
+      $('lead').hidden = false; $('lead').textContent = 'Поканени сте в ' + j.where + ' като ' + j.label + '. Задайте своя парола, за да влезете.';
+      $('email').value = j.email; $('name').value = j.name || ''; $('go').disabled = false; $('name').focus(); })
+    .catch(() => { $('err').textContent = 'Няма връзка със сървъра.'; });
+}
+/* №20: връзка за потвърждение на имейла */
+if (location.pathname === '/verify'){
+  const t = location.hash.slice(1); history.replaceState(null, '', '/login');
+  fetch('/api/verify', { method: 'POST', headers: { 'content-type': 'application/json', 'x-fb': '1' }, body: JSON.stringify({ token: t }) })
+    .then(r => r.json().then(j => ({ ok: r.ok, j }), () => ({ ok: r.ok, j: {} })))
+    .then(({ ok, j }) => { $('err').style.color = ok ? 'inherit' : ''; $('err').textContent = ok ? 'Имейлът е потвърден. Влезте в акаунта си.' : (j.message || 'Връзката не е валидна.'); })
+    .catch(() => { $('err').textContent = 'Няма връзка със сървъра.'; });
+}
 </script></body></html>

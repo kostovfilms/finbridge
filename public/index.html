@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FinBridge</title>
-<link href="/fonts/fonts.css" rel="stylesheet">
 <style>
 /* Layout idea: fixed left rail for the five work steps, one dense working surface on the right; state is carried by pills and a left stripe on rows. */
 :root{
@@ -14,9 +13,9 @@
   --good:#1d7a46; --good-soft:#dcf1e4;
   --warn:#9a5b00; --warn-soft:#fbecd0;
   --crit:#b3261e; --crit-soft:#fbe0de;
-  --font-display:"Manrope","Segoe UI",Arial,sans-serif;
-  --font-body:"Golos Text","Segoe UI",Arial,sans-serif;
-  --font-mono:"IBM Plex Mono",Consolas,monospace;
+  --font-display:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --font-body:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
@@ -150,7 +149,8 @@ pre{margin:0;padding:14px 16px;font:400 12.5px/1.6 var(--font-mono);overflow-x:a
 <script>
 /*CORE-START*/
 const Core = (() => {
-  const r2 = x => Math.round((x + Number.EPSILON) * 100) / 100;
+  /* №16: закръгляне до стотинка без грешката на плаващата запетая. */
+  const r2 = n => { const x = +(+n || 0).toPrecision(12), [m, e] = String(Math.abs(x)).split('e'); return (x < 0 ? -1 : 1) * Number(Math.round(Number(m + 'e' + ((+e || 0) + 2))) + 'e-2') || 0; };
   const pad = n => String(n).padStart(2, '0');
 
   function parseAmount(v){
@@ -177,9 +177,12 @@ const Core = (() => {
   function iso(y, m, d){
     y = +y; m = +m; d = +d;
     if (y < 100) y += 2000;
-    if (!(m >= 1 && m <= 12 && d >= 1 && d <= 31 && y >= 1990 && y <= 2100)) return null;
+    /* №27: денят се проверява спрямо месеца, така че 31.02 и 30.02 не минават. */
+    if (!(m >= 1 && m <= 12 && d >= 1 && y >= 1990 && y <= 2100 && d <= new Date(Date.UTC(y, m, 0)).getUTCDate())) return null;
     return y + '-' + pad(m) + '-' + pad(d);
   }
+  /* №27: сума с един разделител и точно три цифри след него („1.234“) може да е 1234 или 1,234. Чете се като хиляди, но се показва предупреждение. */
+  const ambAmount = v => typeof v === 'string' && /^[^\d]*\d{1,3}[.,]\d{3}[^\d]*$/.test(v.trim());
   function parseDate(v){
     if (v instanceof Date){
       if (isNaN(v)) return null;
@@ -267,7 +270,7 @@ const Core = (() => {
     let c = null, hi = -1;
     for (let i = 0; i < Math.min(rows.length, 30); i++){ c = detectHeader(rows[i]); if (c){ hi = i; break; } }
     if (!c) return null;
-    const txs = []; let skipped = 0;
+    const txs = []; let skipped = 0, ambiguous = 0;
     const cell = (r, i) => i >= 0 && r[i] != null ? r[i] : '';
     const str = v => String(v == null ? '' : v).replace(/\s+/g, ' ').trim();
     for (let i = hi + 1; i < rows.length; i++){
@@ -288,12 +291,13 @@ const Core = (() => {
         }
       }
       if (amount == null || amount === 0){ skipped++; continue; }
+      if ([c.debit, c.credit, c.amount].some(ci => ci >= 0 && ambAmount(cell(r, ci)))) ambiguous++;
       const desc = str(cell(r, c.desc));
       let cp = str(amount < 0 ? (cell(r, c.cpOut) || cell(r, c.cp) || cell(r, c.cpIn)) : (cell(r, c.cpIn) || cell(r, c.cp) || cell(r, c.cpOut)));
       if (!cp) cp = desc.slice(0, 60) || 'Без описание';
       txs.push({date, amount, cp, desc, ref: str(cell(r, c.ref))});
     }
-    return {txs, skipped, signed: c.debit >= 0 || c.credit >= 0 || c.dc >= 0};
+    return {txs, skipped, ambiguous, signed: c.debit >= 0 || c.credit >= 0 || c.dc >= 0};
   }
 
   function parseMT940(text){
@@ -357,7 +361,7 @@ const Core = (() => {
     if (/^:61:/m.test(t) && /^:(20|25|60[FM]):/m.test(t)) return {format: 'MT940', txs: parseMT940(t), skipped: 0, signed: true};
     if (/<(?:[\w.-]+:)?Ntry[\s>]/.test(t)) return {format: 'XML (camt.053)', txs: parseCamt(t), skipped: 0, signed: true};
     const r = parseTable(splitCSV(t));
-    return r ? {format: 'CSV', txs: r.txs, skipped: r.skipped, signed: r.signed} : null;
+    return r ? {format: 'CSV', txs: r.txs, skipped: r.skipped, ambiguous: r.ambiguous, signed: r.signed} : null;
   }
 
   const sep = '(^|[^a-zа-я0-9])', end = '([^a-zа-я0-9]|$)';
@@ -400,8 +404,9 @@ const Core = (() => {
     if (!(doc.total > 0)) return out;
     const num = String(doc.number || '').replace(/\D/g, '').replace(/^0+/, '');
     for (const t of txs){
-      if (t.docId || !(t.amount < 0)) continue;
-      if (Math.abs(Math.abs(t.amount) - doc.total) > 0.011) continue;
+      /* Кредитно известие от доставчик се засича с върнати пари (постъпление), а не с плащане. */
+      if (t.docId || !((doc.docType === 'credit_note' ? -t.amount : t.amount) < 0)) continue;
+      if (Math.abs(Math.round(r2(Math.abs(t.amount)) * 100) - Math.round(r2(doc.total) * 100)) > 1) continue; /* допуск 1 стотинка при засичане */
       let diff = null;
       if (doc.date){ diff = dayDiff(t.date, doc.date); if (diff < -15 || diff > 120) continue; }
       const text = t.cp + ' ' + t.desc;
@@ -490,9 +495,9 @@ const Core = (() => {
     const rows = [['№', 'Вид', 'Номер', 'Дата', 'ДДС номер или ЕИК', 'Доставчик', 'Предмет', 'ДО с право на данъчен кредит', 'ДДС с право на данъчен кредит', 'ДО и ДДС без право на данъчен кредит', 'Данъчен кредит', 'Сметка']];
     let i = 0;
     for (const d of P.docs.filter(d => d.docType === 'invoice' || d.docType === 'credit_note').sort((a, b) => (a.date || '').localeCompare(b.date || ''))){
-      const none = d.vatMode === 'none';
+      const none = d.vatMode === 'none', sg = d.docType === 'credit_note' ? -1 : 1, n = v => v == null ? '' : num(sg * Math.abs(v), dec); /* кредитното известие намалява покупките */
       rows.push([++i, TYPES[d.docType], d.number, fd(d.date), d.supplierVat || d.supplierEik, d.supplier, d.subject || (d.lines && d.lines[0] ? d.lines[0].name : ''),
-        none ? '' : num(d.base, dec), none ? '' : num(d.vat, dec), none ? num(d.total, dec) : '', VATM[d.vatMode || 'full'], d.acc || '']);
+        none ? '' : n(d.base), none ? '' : n(d.vat), none ? n(d.total) : '', VATM[d.vatMode || 'full'], d.acc || '']);
     }
     return csv(rows);
   }
@@ -501,11 +506,13 @@ const Core = (() => {
   function exportPostings(P, dec){
     const rows = [['Дата', 'Вид документ', 'Номер', 'Контрагент', 'ЕИК', 'Основание', 'Дебит', 'Кредит', 'Сума']];
     for (const d of P.docs.filter(d => d.docType === 'invoice' || d.docType === 'credit_note').sort((a, b) => (a.date || '').localeCompare(b.date || ''))){
-      const head = [fd(d.date), TYPES[d.docType], d.number, d.supplier, d.supplierEik], what = d.subject || (d.lines && d.lines[0] ? d.lines[0].name : '') || 'Покупка', mode = d.vatMode || 'full';
-      if (mode === 'none' || !d.vat) rows.push(head.concat([what, d.acc || '', '401', num(d.total, dec)]));
-      else { rows.push(head.concat([what, d.acc || '', '401', num(d.base, dec)])); rows.push(head.concat(['ДДС по покупка' + (mode === 'partial' ? ' (частичен данъчен кредит)' : ''), '4531', '401', num(d.vat, dec)])); }
+      const head = [fd(d.date), TYPES[d.docType], d.number, d.supplier, d.supplierEik], cn = d.docType === 'credit_note', what = d.subject || (d.lines && d.lines[0] ? d.lines[0].name : '') || (cn ? 'Намаление по покупка' : 'Покупка'), mode = d.vatMode || 'full', n = v => v == null ? '' : num((cn ? -1 : 1) * Math.abs(v), dec);
+      /* Кредитното известие се сторнира: същите сметки с отрицателна сума. */
+      if (mode === 'none' || !d.vat) rows.push(head.concat([what, d.acc || '', '401', n(d.total)]));
+      else { rows.push(head.concat([what, d.acc || '', '401', n(d.base)])); rows.push(head.concat(['ДДС по покупка' + (mode === 'partial' ? ' (частичен данъчен кредит)' : ''), '4531', '401', n(d.vat)])); }
       const t = d.txId ? P.txs.find(t => t.id === d.txId) : null;
-      if (t) rows.push([fd(t.date), 'Банково плащане', d.number, d.supplier, d.supplierEik, 'Плащане по ' + TYPES[d.docType].toLowerCase() + ' ' + (d.number || ''), '401', '503', num(d.total != null ? d.total : Math.abs(t.amount), dec)]);
+      if (t && cn) rows.push([fd(t.date), 'Банково постъпление', d.number, d.supplier, d.supplierEik, 'Върната сума по кредитно известие ' + (d.number || ''), '503', '401', num(Math.abs(d.total != null ? d.total : t.amount), dec)]);
+      else if (t) rows.push([fd(t.date), 'Банково плащане', d.number, d.supplier, d.supplierEik, 'Плащане по ' + TYPES[d.docType].toLowerCase() + ' ' + (d.number || ''), '401', '503', num(d.total != null ? d.total : Math.abs(t.amount), dec)]);
     }
     return csv(rows);
   }
@@ -568,7 +575,14 @@ const Core = (() => {
     const d = String(e || '').replace(/\D/g, '').split('').map(Number);
     const mod = (from, n, w1, w2) => { let s = 0; for (let i = 0; i < n; i++) s += d[from + i] * w1[i]; let r = s % 11;
       if (r === 10){ s = 0; for (let i = 0; i < n; i++) s += d[from + i] * w2[i]; r = s % 11; if (r === 10) r = 0; } return r; };
-    if (d.length === 10) return true;
+    /* №29: 10 цифри е ЕГН или ЛНЧ; проверяват се контролната цифра и датата в ЕГН. Само нули не е валиден номер. */
+    if (!d.length || d.every(x => x === 0)) return false;
+    if (d.length === 10){
+      let r = [2, 4, 8, 5, 10, 9, 7, 3, 6].reduce((a, x, i) => a + x * d[i], 0) % 11; if (r === 10) r = 0;
+      const mo = d[2] * 10 + d[3], dy = d[4] * 10 + d[5], mm = mo > 40 ? mo - 40 : mo > 20 ? mo - 20 : mo, y = (mo > 40 ? 2000 : mo > 20 ? 1800 : 1900) + d[0] * 10 + d[1];
+      if (r === d[9] && mm >= 1 && mm <= 12 && dy >= 1 && dy <= new Date(Date.UTC(y, mm, 0)).getUTCDate()) return true;
+      return [21, 19, 17, 13, 11, 9, 7, 3, 1].reduce((a, x, i) => a + x * d[i], 0) % 10 === d[9];
+    }
     if (d.length !== 9 && d.length !== 13) return false;
     if (mod(0, 8, [1,2,3,4,5,6,7,8], [3,4,5,6,7,8,9,10]) !== d[8]) return false;
     return d.length === 9 || mod(8, 4, [2,7,3,5], [4,9,5,7]) === d[12];
@@ -584,7 +598,7 @@ const Core = (() => {
     return csv(rows);
   }
 
-  return {csv, r2, parseAmount, parseDate, splitCSV, parseTable, parseMT940, parseCamt, parseStatement, classify, withKeys, nameSim, nameTokens,
+  return {csv, r2, ambAmount, parseAmount, parseDate, splitCSV, parseTable, parseMT940, parseCamt, parseStatement, classify, withKeys, nameSim, nameTokens,
     findMatches, decideMatch, docOk, validateDoc, CATS, CAT_LABEL, ACCOUNTS, VATM, supplierKey, cpKey, codingFor, findGroup, exportLedger, exportPostings, eikValid, encode1251, COLS, DEFAULT_COLS, TYPES, periodLabel, shiftPeriod, deadline, cur, fd, money, reminderText, exportDocs, exportLines, exportMissing, dayDiff};
 })();
 /*CORE-END*/
@@ -618,6 +632,8 @@ async function loadP(f, p){
 function fail(e){
   const code = e && e.code;
   S.toast = {cls: 'crit', text: code === 'quota_exceeded' ? 'Хранилището е пълно. Изтрийте стари периоди или фирми.' :
+    code === 'period_too_large' ? e.message :
+    code === 'conflict' ? 'Колега е променил този месец междувременно. Заредена е неговата версия; повторете последната си промяна.' :
     code === 'invalid_argument' ? 'Записът беше отказан. Вероятно нямате права за редакция или документът е твърде голям.' :
     'Записът не успя (' + (code || 'грешка') + '). Проверете връзката и опитайте пак.'};
   softRender();
@@ -816,7 +832,7 @@ async function readStatement(file){
     if (/\.xls$/.test(name)) throw new Error('Старият формат .xls не се поддържа. Запишете файла като .xlsx или CSV.');
     rows = await readXlsx(await file.arrayBuffer());
     const r = Core.parseTable(rows);
-    if (r) return {format: 'Excel', txs: r.txs, skipped: r.skipped, signed: r.signed};
+    if (r) return {format: 'Excel', txs: r.txs, skipped: r.skipped, ambiguous: r.ambiguous, signed: r.signed};
     text = rows.map(r => r.join(' | ')).join('\n');
   } else if (/\.pdf$/.test(name) || file.type === 'application/pdf'){
     text = await pdfText(await pdfOpen(file), 40);
@@ -928,8 +944,8 @@ const M = n => Core.money(n);
 const D = d => Core.fd(d).slice(0, 5);
 
 function ctx(withFirm){
-  return '<div class="ctx"><label>Период <input type="month" id="period" value="' + S.period + '"></label>' +
-    (withFirm && S.firms.length ? '<label>Фирма <select id="firm">' + S.firms.map(f => '<option value="' + f.id + '"' + (f.id === curFirm().id ? ' selected' : '') + '>' + esc(f.name) + '</option>').join('') + '</select></label>' : '') + '</div>';
+  return '<div class="ctx"><label>Период <input type="month" id="period" value="' + esc(S.period) + '"></label>' +
+    (withFirm && S.firms.length ? '<label>Фирма <select id="firm">' + S.firms.map(f => '<option value="' + esc(f.id) + '"' + (f.id === curFirm().id ? ' selected' : '') + '>' + esc(f.name) + '</option>').join('') + '</select></label>' : '') + '</div>';
 }
 function banner(){
   let h = '';
@@ -955,10 +971,10 @@ function firmForm(f){
     (window.FB && (FB.me || {}).mail ? '<label class="full" style="flex-direction:row;align-items:center;gap:8px;color:var(--ink);font-size:14px"><input type="checkbox" id="firm-auto" name="auto" style="width:auto"' + (f.auto ? ' checked' : '') + '> Автоматично напомняне по имейл на всеки ' + plural(FB.me.remindDays || 3, 'ден', 'дни') + ', докато има липсващи документи за приключен месец</label>' : '') +
     (window.FB ? '<label class="full" style="flex-direction:row;align-items:center;gap:8px;color:var(--ink);font-size:14px"><input type="checkbox" id="firm-stats" name="stats" style="width:auto"' + (f.stats ? ' checked' : '') + '> Показвай на клиента обобщение на разходите и постъпленията в страницата му</label>' : '') + '</div>' +
     (window.FB && f.portal ? '<div class="note info">Финансово управление за фирмата: разходи с одобрение, плащания, вземания, бюджети и прогноза. <a id="fin-link" href="/company?firm=' + encodeURIComponent(f.id) + '">Отвори финансите и дай достъп на фирмата</a></div>' : '') +
-    (f.portal ? '<div class="note info">Връзка за качване от клиента: <span id="portal-url">' + esc(f.portal) + '</span> <button class="btn small" type="button" data-act="copy-portal" data-id="' + f.id + '">' + (S.copied === 'portal' ? 'Копирано' : 'Копирай') + '</button> ' +
-      '<button class="btn small quiet" type="button" data-act="reset-portal" data-id="' + f.id + '">' + (S.confirm === 'portal' + f.id ? 'Старата връзка ще спре да работи. Потвърди' : 'Нова връзка') + '</button></div>' : '') +
+    (f.portal ? '<div class="note info">Връзка за качване от клиента: <span id="portal-url">' + esc(f.portal) + '</span> <button class="btn small" type="button" data-act="copy-portal" data-id="' + esc(f.id) + '">' + (S.copied === 'portal' ? 'Копирано' : 'Копирай') + '</button> ' +
+      '<button class="btn small quiet" type="button" data-act="reset-portal" data-id="' + esc(f.id) + '">' + (S.confirm === 'portal' + f.id ? 'Старата връзка ще спре да работи. Потвърди' : 'Нова връзка') + '</button></div>' : '') +
     '<div class="tools"><button class="btn primary" type="submit">Запази</button><button class="btn" type="button" data-act="cancel">Отказ</button>' +
-    (f.id ? '<button class="btn quiet" type="button" data-act="del-firm" data-id="' + f.id + '">' + (S.confirm === 'firm' + f.id ? 'Потвърди изтриването на фирмата и всичките ѝ данни' : 'Изтрий фирмата') + '</button>' : '') + '</div></form>';
+    (f.id ? '<button class="btn quiet" type="button" data-act="del-firm" data-id="' + esc(f.id) + '">' + (S.confirm === 'firm' + f.id ? 'Потвърди изтриването на фирмата и всичките ѝ данни' : 'Изтрий фирмата') + '</button>' : '') + '</div></form>';
 }
 
 function vClients(){
@@ -968,13 +984,13 @@ function vClients(){
     const p = P(f.id), n = p.txs.filter(t => t.needsDoc), m = n.filter(t => t.docId).length, x = n.length - m, rev = p.docs.filter(d => d.suggestTx && !d.txId).length;
     need += n.length; ok += m; miss += x; if (x) firms++; missSum += missing(p).reduce((s, t) => s + Math.abs(t.amount), 0);
     const st = p.closed ? '<span class="pill ok">Приключен</span>' : !p.txs.length ? '<span class="pill none">Няма извлечение</span>' : x ? '<span class="pill miss">Чака ' + plural(x, 'документ', 'документа') + '</span>' : '<span class="pill ok">Готова за експорт</span>';
-    return '<tr class="click ' + (!p.txs.length ? '' : x ? 's-miss' : 's-ok') + '" data-act="open" data-id="' + f.id + '" tabindex="0">' +
+    return '<tr class="click ' + (!p.txs.length ? '' : x ? 's-miss' : 's-ok') + '" data-act="open" data-id="' + esc(f.id) + '" tabindex="0">' +
       '<td class="wrap"><strong>' + esc(f.name) + '</strong><div class="dim">' + (f.eik ? 'ЕИК ' + esc(f.eik) : 'без ЕИК') + '</div></td>' +
       '<td class="wrap">' + esc(f.contact || '') + ' <span class="chip">' + esc(f.channel || 'Viber') + '</span></td>' +
       '<td><div class="bar"><i style="width:' + (n.length ? Math.round(m / n.length * 100) : 0) + '%"></i></div><div class="dim">' + m + ' от ' + n.length + ' плащания с документ</div></td>' +
       '<td>' + st + (rev ? ' <span class="pill rev">' + rev + ' за преглед</span>' : '') + (S.inbox.some(x => x.firm === f.id) ? ' <span class="pill rev">' + plural(S.inbox.filter(x => x.firm === f.id).length, 'нов файл', 'нови файла') + '</span>' : '') +
       ((n => n ? ' <span class="pill rev">' + plural(n, 'отговор', 'отговора') + ' от клиента</span>' : '')(S.replies.filter(x => x.firm === f.id).length + S.questions.filter(x => x.firm === f.id && x.answer).length)) + '</td>' +
-      '<td><button class="btn small" data-act="edit-firm" data-id="' + f.id + '">Редактирай</button></td></tr>';
+      '<td><button class="btn small" data-act="edit-firm" data-id="' + esc(f.id) + '">Редактирай</button></td></tr>';
   }).join('');
   const head = '<div class="head"><div><h1>Приключване на ' + Core.periodLabel(per) + '</h1><p class="sub">Кои фирми са готови за осчетоводяване и кои още дължат документи.</p></div><div class="tools">' + ctx(false) +
     '<button class="btn primary" data-act="new-firm">Добави фирма</button></div></div>' + banner();
@@ -1008,6 +1024,7 @@ function vReconcile(){
     const i = S.imp, out = i.txs.filter(t => t.amount < 0).length;
     h += '<div class="panel pad"><h2>Преглед преди импорт: ' + esc(i.name) + '</h2><div class="dim">Формат: ' + esc(i.format) + '. Открити ' + plural(i.txs.length, 'движение', 'движения') + ': ' + out + ' изходящи и ' + (i.txs.length - out) + ' входящи.' +
       (i.skipped ? ' Пропуснати редове без дата или сума: ' + i.skipped + '.' : '') + '</div>' +
+      (i.ambiguous ? '<div class="note warn">' + plural(i.ambiguous, 'сума е', 'суми са') + ' с един разделител и три цифри след него (например 1.234). Прочетени са като хиляди (1 234,00). Сверете ги с оригинала преди импорт.</div>' : '') +
       (i.ai ? '<div class="note warn">Извлечението е разчетено с Claude, защото форматът не беше разпознат. Сверете броя и сумите с оригинала преди импорт.' + (i.cut ? ' Файлът е дълъг и е прочетена само първата му част.' : '') + '</div>' : '') +
       (!i.signed ? '<div class="note warn">Във файла няма колона за посока на плащането. Ако изходящите са показани като входящи, обърнете знака.</div>' : '') +
       '<div class="scroll"><table><thead><tr><th class="num">Дата</th><th>Контрагент</th><th>Основание</th><th class="num">Сума</th></tr></thead><tbody>' +
@@ -1016,7 +1033,7 @@ function vReconcile(){
       '<div class="tools"><button class="btn primary" data-act="imp-ok">Импортирай</button><button class="btn" data-act="imp-flip">Обърни знака на сумите</button><button class="btn" data-act="imp-cancel">Отказ</button></div></div>';
   }
   if (S.editing && S.editing.type === 'tx') h += '<form class="panel pad" data-form="tx"><h2>Ново плащане</h2><div class="form">' +
-    '<label>Дата<input type="date" id="tx-date" name="date" required value="' + S.period + '-01"></label><label>Контрагент<input type="text" id="tx-cp" name="cp" required></label>' +
+    '<label>Дата<input type="date" id="tx-date" name="date" required value="' + esc(S.period) + '-01"></label><label>Контрагент<input type="text" id="tx-cp" name="cp" required></label>' +
     '<label>Основание<input type="text" id="tx-desc" name="desc"></label><label>Сума<input type="text" id="tx-amount" name="amount" inputmode="decimal" required></label>' +
     '<label>Посока<select id="tx-dir" name="dir"><option value="out">Изходящо плащане</option><option value="in">Постъпление</option></select></label></div>' +
     '<div class="tools"><button class="btn primary" type="submit">Добави</button><button class="btn" type="button" data-act="cancel">Отказ</button></div></form>';
@@ -1026,19 +1043,19 @@ function vReconcile(){
   const rows = list.map(t => {
     const [cls, label, extra] = txStatus(p, t); let act = '';
     const rp = S.replies.find(r => r.firm === f.id && r.period === S.period && r.tx === t.id);
-    if (cls === 'miss') act = '<button class="btn small" data-act="no-doc" data-id="' + t.id + '">Без документ</button>';
-    if (cls === 'none' && t.amount < 0) act = '<button class="btn small" data-act="need-doc" data-id="' + t.id + '">Изисква документ</button>' + (Core.cpKey(t.cp) && !S.rules.cp[Core.cpKey(t.cp)] ? ' <button class="btn small" data-act="cp-rule" data-id="' + t.id + '">Винаги без документ</button>' : '');
+    if (cls === 'miss') act = '<button class="btn small" data-act="no-doc" data-id="' + esc(t.id) + '">Без документ</button>';
+    if (cls === 'none' && t.amount < 0) act = '<button class="btn small" data-act="need-doc" data-id="' + esc(t.id) + '">Изисква документ</button>' + (Core.cpKey(t.cp) && !S.rules.cp[Core.cpKey(t.cp)] ? ' <button class="btn small" data-act="cp-rule" data-id="' + esc(t.id) + '">Винаги без документ</button>' : '');
     if (cls === 'rev') act = '<button class="btn small primary" data-act="confirm" data-id="' + suggested(p, t).id + '">Потвърди</button> <button class="btn small" data-act="show-doc" data-id="' + suggested(p, t).id + '">Виж</button>';
-    if (cls === 'ok') act = '<button class="btn small" data-act="show-doc" data-id="' + t.docId + '">Виж документа</button>';
-    if (window.FB && t.amount < 0 && !t.docId) act += ' <button class="btn small" data-act="ask" data-id="' + t.id + '">Попитай</button>';
-    act += ' <button class="btn small quiet" data-act="del-tx" data-id="' + t.id + '" aria-label="Изтрий плащането">' + (S.confirm === 'tx' + t.id ? 'Сигурно?' : 'Изтрий') + '</button>';
+    if (cls === 'ok') act = '<button class="btn small" data-act="show-doc" data-id="' + esc(t.docId) + '">Виж документа</button>';
+    if (window.FB && t.amount < 0 && !t.docId) act += ' <button class="btn small" data-act="ask" data-id="' + esc(t.id) + '">Попитай</button>';
+    act += ' <button class="btn small quiet" data-act="del-tx" data-id="' + esc(t.id) + '" aria-label="Изтрий плащането">' + (S.confirm === 'tx' + t.id ? 'Сигурно?' : 'Изтрий') + '</button>';
     return '<tr class="s-' + cls + '"><td class="num">' + D(t.date) + '</td><td class="wrap">' + esc(t.cp) + (t.desc && t.desc !== t.cp ? '<div class="dim">' + esc(t.desc) + '</div>' : '') + '</td><td><span class="chip">' + esc(t.kind) + '</span></td>' +
       '<td class="num">' + M(t.amount) + '</td><td><span class="pill ' + cls + '">' + label + '</span> <span class="dim">' + esc(extra) + '</span>' +
-      (rp && !t.docId ? '<div class="note info" style="margin-top:6px">Клиентът отговори: ' + esc(rp.note) + '<div class="tools" style="margin-top:6px"><button class="btn small primary" data-act="reply-ok" data-id="' + rp.id + '">Приеми без документ</button><button class="btn small" data-act="reply-no" data-id="' + rp.id + '">Искам документ</button></div></div>' : '') +
+      (rp && !t.docId ? '<div class="note info" style="margin-top:6px">Клиентът отговори: ' + esc(rp.note) + '<div class="tools" style="margin-top:6px"><button class="btn small primary" data-act="reply-ok" data-id="' + esc(rp.id) + '">Приеми без документ</button><button class="btn small" data-act="reply-no" data-id="' + esc(rp.id) + '">Искам документ</button></div></div>' : '') +
       (t.note && !t.needsDoc ? '<div class="dim">бележка: ' + esc(t.note) + '</div>' : '') +
       S.questions.filter(x => x.firm === f.id && x.period === S.period && x.tx === t.id).map(x => '<div class="note info" style="margin-top:6px">Въпрос: ' + esc(x.question) + (x.answer ? '<br><strong>Отговор на клиента:</strong> ' + esc(x.answer) : ' <span class="dim">(чака отговор)</span>') +
-        ' <button class="btn small" data-act="q-close" data-id="' + x.id + '">Затвори</button></div>').join('') +
-      (S.editing && S.editing.type === 'ask' && S.editing.tx === t.id ? '<form data-form="ask" class="tools" style="margin-top:6px"><input type="hidden" name="tx" value="' + t.id + '"><input type="text" id="ask-text" name="text" required maxlength="300" placeholder="Въпрос към клиента" aria-label="Въпрос към клиента" style="flex:1;min-width:180px"><button class="btn small primary" type="submit">Изпрати</button><button class="btn small" type="button" data-act="cancel">Отказ</button></form>' : '') + '</td><td style="white-space:nowrap">' + act + '</td></tr>';
+        ' <button class="btn small" data-act="q-close" data-id="' + esc(x.id) + '">Затвори</button></div>').join('') +
+      (S.editing && S.editing.type === 'ask' && S.editing.tx === t.id ? '<form data-form="ask" class="tools" style="margin-top:6px"><input type="hidden" name="tx" value="' + esc(t.id) + '"><input type="text" id="ask-text" name="text" required maxlength="300" placeholder="Въпрос към клиента" aria-label="Въпрос към клиента" style="flex:1;min-width:180px"><button class="btn small primary" type="submit">Изпрати</button><button class="btn small" type="button" data-act="cancel">Отказ</button></form>' : '') + '</td><td style="white-space:nowrap">' + act + '</td></tr>';
   }).join('');
   if (!miss.length && !p.docs.some(d => d.suggestTx && !d.txId)) h += '<div class="note good">Всички плащания на ' + esc(f.name) + ' за периода са покрити.</div>';
   return h + '<div class="panel"><div class="scroll"><table><thead><tr><th class="num">Дата</th><th>Контрагент и основание</th><th>Вид</th><th class="num">Сума</th><th>Статус</th><th>Действие</th></tr></thead><tbody>' +
@@ -1052,8 +1069,8 @@ function clientBox(f, where){
   if (where === 'inbox' && inv.length) h += '<div class="note info">Клиентът е качил ' + plural(inv.length, 'нов файл', 'нови файла') + ': ' + esc(inv.slice(0, 5).map(x => x.name).join(', ')) + (inv.length > 5 ? '…' : '') +
     (inv.some(x => x.note) ? '<br>Бележки: ' + esc([...new Set(inv.filter(x => x.note).map(x => x.note))].join(' · ')) : '') + ' <button class="btn small primary" data-act="read-inbox">Разчети ги</button></div>';
   if (rest.length) h += '<div class="note info">От клиента:' + rest.map(x => '<div style="margin-top:6px">' + KINDS[x.kind] + ' „' + esc(x.name) + '“' + (x.note ? ' · ' + esc(x.note) : '') + '<div class="tools" style="margin-top:4px">' +
-    (x.kind === 'statement' ? '<button class="btn small primary" data-act="imp-client" data-id="' + x.id + '">Импортирай</button>' : '') +
-    '<a class="btn small" href="/api/files/' + encodeURIComponent(x.id) + '" target="_blank" rel="noopener">Отвори</a><button class="btn small" data-act="file-done" data-id="' + x.id + '">Прегледано</button></div></div>').join('') + '</div>';
+    (x.kind === 'statement' ? '<button class="btn small primary" data-act="imp-client" data-id="' + esc(x.id) + '">Импортирай</button>' : '') +
+    '<a class="btn small" href="/api/files/' + encodeURIComponent(x.id) + '" target="_blank" rel="noopener">Отвори</a><button class="btn small" data-act="file-done" data-id="' + esc(x.id) + '">Прегледано</button></div></div>').join('') + '</div>';
   return h;
 }
 const dupOf = (p, d) => d.number && p.docs.find(x => x !== d && x.number === d.number && (x.supplierEik && d.supplierEik ? x.supplierEik === d.supplierEik : Core.nameSim(x.supplier, d.supplier) >= 0.5));
@@ -1089,7 +1106,7 @@ function vInbox(){
     (sample ? 'Разчитането е с Claude и ползва вашия лимит.' : 'Автоматичното разчитане не е достъпно в този изглед, данните се въвеждат ръчно.') + '</div></div>';
   h += clientBox(f, 'inbox');
   const rows = list.map(d => { const [cls, label] = docStatus(p, d);
-    return '<tr class="click s-' + cls + (d.id === S.doc ? ' sel' : '') + '" data-act="pick-doc" data-id="' + d.id + '" tabindex="0"><td class="num">' + D(d.date) + '</td>' +
+    return '<tr class="click s-' + cls + (d.id === S.doc ? ' sel' : '') + '" data-act="pick-doc" data-id="' + esc(d.id) + '" tabindex="0"><td class="num">' + D(d.date) + '</td>' +
       '<td class="wrap">' + esc(d.supplier || d.file || 'Без име') + '<div class="dim">' + (d.number ? '№ ' + esc(d.number) : esc(d.file || '')) + '</div></td><td class="num">' + M(d.total) + '</td><td><span class="pill ' + cls + '">' + label + '</span></td></tr>'; }).join('');
   let det = '<div class="empty">Изберете документ от списъка.</div>';
   const d = p.docs.find(x => x.id === S.doc);
@@ -1103,15 +1120,15 @@ function vInbox(){
       '<dl class="fields"><dt>Доставчик</dt><dd>' + esc(d.supplier) + '</dd><dt>ЕИК</dt><dd>' + esc(d.supplierEik) + '</dd><dt>Дата</dt><dd>' + Core.fd(d.date) + '</dd>' +
       '<dt>Данъчна основа</dt><dd>' + M(d.base) + '</dd><dt>ДДС</dt><dd>' + M(d.vat) + '</dd><dt>Общо</dt><dd><strong>' + M(d.total) + ' ' + esc(d.currency || '') + '</strong></dd></dl>' +
       (d.lines.length ? '<div class="scroll"><table class="lines"><thead><tr><th>Ред</th><th class="num">К-во</th><th>Мярка</th><th class="num">Ед. цена</th><th class="num">Стойност</th></tr></thead><tbody>' +
-        d.lines.map(l => '<tr><td class="wrap">' + esc(l.name) + '</td><td class="num">' + (l.qty == null ? '' : l.qty) + '</td><td>' + esc(l.unit) + '</td><td class="num">' + M(l.price) + '</td><td class="num">' + M(l.amount) + '</td></tr>').join('') + '</tbody></table></div>' : '') +
+        d.lines.map(l => '<tr><td class="wrap">' + esc(l.name) + '</td><td class="num">' + (l.qty == null ? '' : esc(l.qty)) + '</td><td>' + esc(l.unit) + '</td><td class="num">' + M(l.price) + '</td><td class="num">' + M(l.amount) + '</td></tr>').join('') + '</tbody></table></div>' : '') +
       '<div class="note ' + (d.acc ? 'info' : 'warn') + '">' + (d.acc ? 'Контиране: Дт ' + esc(d.acc) + ' / Кт 401, данъчен кредит: ' + Core.VATM[d.vatMode || 'full'] +
         ' <span class="dim">(' + ({rule: 'по правило за доставчика', ai: 'предложение по вид на доставката: ' + (Core.CAT_LABEL[d.category] || ''), manual: 'зададено ръчно'}[d.accSrc] || '') + ')</span>'
         : (d.category === 'asset' ? 'Вероятно дълготраен актив. ' : '') + 'Няма сметка. Задайте я от „Редактирай“ и тя ще се помни за доставчика.') + '</div>' +
       '<div><span class="pill ' + cls + '">' + label + '</span></div>' +
-      (sug ? '<div class="note info">Вероятно плащане: ' + D(sug.date) + ', ' + esc(sug.cp) + ', ' + M(sug.amount) + '</div><div class="tools"><button class="btn primary" data-act="confirm" data-id="' + d.id + '">Потвърди засичането</button><button class="btn" data-act="reject" data-id="' + d.id + '">Не е това</button></div>' : '') +
-      (!d.txId && free.length ? '<div class="tools"><select id="link-tx" aria-label="Плащане за свързване">' + free.map(t => '<option value="' + t.id + '">' + D(t.date) + ' · ' + esc(t.cp.slice(0, 40)) + ' · ' + M(t.amount) + (t.docId ? ' · вече с документ' : '') + '</option>').join('') + '</select><button class="btn" data-act="link" data-id="' + d.id + '">Свържи с плащане</button></div>' : '') +
-      '<div class="tools"><button class="btn" data-act="edit-doc" data-id="' + d.id + '">Редактирай</button>' + (window.FB && d.fileId ? '<a class="btn" href="/api/files/' + encodeURIComponent(d.fileId) + '" target="_blank" rel="noopener">Виж оригинала</a>' : '') + (d.txId ? '<button class="btn" data-act="unlink" data-id="' + d.id + '">Разкачи от плащането</button>' : '<button class="btn" data-act="move-doc" data-id="' + d.id + '">Премести в следващия месец</button>') +
-      '<button class="btn quiet" data-act="del-doc" data-id="' + d.id + '">' + (S.confirm === 'doc' + d.id ? 'Потвърди изтриването' : 'Изтрий') + '</button></div></div>';
+      (sug ? '<div class="note info">Вероятно плащане: ' + D(sug.date) + ', ' + esc(sug.cp) + ', ' + M(sug.amount) + '</div><div class="tools"><button class="btn primary" data-act="confirm" data-id="' + esc(d.id) + '">Потвърди засичането</button><button class="btn" data-act="reject" data-id="' + esc(d.id) + '">Не е това</button></div>' : '') +
+      (!d.txId && free.length ? '<div class="tools"><select id="link-tx" aria-label="Плащане за свързване">' + free.map(t => '<option value="' + esc(t.id) + '">' + D(t.date) + ' · ' + esc(t.cp.slice(0, 40)) + ' · ' + M(t.amount) + (t.docId ? ' · вече с документ' : '') + '</option>').join('') + '</select><button class="btn" data-act="link" data-id="' + esc(d.id) + '">Свържи с плащане</button></div>' : '') +
+      '<div class="tools"><button class="btn" data-act="edit-doc" data-id="' + esc(d.id) + '">Редактирай</button>' + (window.FB && d.fileId ? '<a class="btn" href="/api/files/' + encodeURIComponent(d.fileId) + '" target="_blank" rel="noopener">Виж оригинала</a>' : '') + (d.txId ? '<button class="btn" data-act="unlink" data-id="' + esc(d.id) + '">Разкачи от плащането</button>' : '<button class="btn" data-act="move-doc" data-id="' + esc(d.id) + '">Премести в следващия месец</button>') +
+      '<button class="btn quiet" data-act="del-doc" data-id="' + esc(d.id) + '">' + (S.confirm === 'doc' + d.id ? 'Потвърди изтриването' : 'Изтрий') + '</button></div></div>';
   }
   return h + '<div class="split"><div class="panel"><div class="scroll"><table style="min-width:480px"><thead><tr><th class="num">Дата</th><th>Доставчик</th><th class="num">Общо</th><th>Статус</th></tr></thead><tbody>' +
     (rows || '<tr><td colspan="4" class="empty">Още няма документи за ' + Core.periodLabel(S.period) + '.</td></tr>') + '</tbody></table></div></div><div class="panel">' + det + '</div></div>';
@@ -1124,7 +1141,7 @@ function vReminders(){
   const text = S.rem[rk] != null ? S.rem[rk] : (miss.length ? Core.reminderText(f, miss, S.period) : '');
   const isMail = /@/.test(f.address || '');
   const rows = S.firms.map(x => { const q = P(x.id), n = missing(q).length, last = q.reminders.length ? q.reminders[q.reminders.length - 1].at : null;
-    return '<tr class="click ' + (n ? 's-miss' : q.txs.length ? 's-ok' : '') + (x.id === f.id ? ' sel' : '') + '" data-act="pick-firm" data-id="' + x.id + '" tabindex="0"><td class="wrap">' + esc(x.name) + '</td><td><span class="chip">' + esc(x.channel || 'Viber') + '</span></td>' +
+    return '<tr class="click ' + (n ? 's-miss' : q.txs.length ? 's-ok' : '') + (x.id === f.id ? ' sel' : '') + '" data-act="pick-firm" data-id="' + esc(x.id) + '" tabindex="0"><td class="wrap">' + esc(x.name) + '</td><td><span class="chip">' + esc(x.channel || 'Viber') + '</span></td>' +
       '<td>' + (n ? '<span class="pill miss">' + plural(n, 'липсващ', 'липсващи') + '</span>' : '<span class="pill ' + (q.txs.length ? 'ok">Всичко е налице' : 'none">Няма извлечение') + '</span>') + '</td><td class="dim">' + (last ? 'напомнено на ' + D(last) : '') + (x.lastAuto ? ' авт. имейл на ' + D(x.lastAuto) : '') + (x.auto ? ' <span class="chip">авт.</span>' : '') + '</td></tr>'; }).join('');
   let right;
   if (!miss.length) right = '<div class="empty">' + (p.txs.length ? 'За ' + esc(f.name) + ' няма липсващи документи за периода.' : 'За ' + esc(f.name) + ' още няма импортирано извлечение.') + '</div>';
@@ -1184,20 +1201,27 @@ function vRules(){
     (cp.length ? cp.map(([k, r]) => '<tr><td class="wrap">' + esc(r.name || k) + '</td><td><button class="btn small quiet" data-act="del-rule" data-kind="cp" data-id="' + esc(k) + '">Изтрий</button></td></tr>').join('') : '<tr><td class="empty">Още няма такива правила.</td></tr>') + '</tbody></table></div></div>';
 }
 function vOffice(){
-  const me = FB.me || {}, us = S.users;
-  const rows = (us || []).map(u => '<tr><td class="wrap">' + esc(u.email) + (u.me ? ' <span class="chip">вие</span>' : '') + '</td><td class="dim">от ' + D(u.created) + '</td><td>' +
-    (u.me ? '' : '<button class="btn small quiet" data-act="del-user" data-id="' + u.id + '">' + (S.confirm === 'user' + u.id ? 'Потвърди премахването' : 'Премахни') + '</button>') + '</td></tr>').join('');
+  const me = FB.me || {}, us = S.users, own = me.role === 'owner', inv = S.invites || [], RL = {owner: 'собственик', accountant: 'счетоводител'};
+  const rows = (us || []).map(u => '<tr><td class="wrap">' + esc(u.email) + (u.me ? ' <span class="chip">вие</span>' : '') + '</td><td>' + (RL[u.role] || '') + '</td><td class="dim">от ' + D(u.created) + '</td><td>' +
+    (own && !u.me ? '<div class="tools"><button class="btn small quiet" data-act="user-role" data-id="' + esc(u.id) + '" data-role="' + (u.role === 'owner' ? 'accountant' : 'owner') + '">' + (u.role === 'owner' ? 'Направи счетоводител' : 'Направи собственик') + '</button>' +
+      '<button class="btn small quiet" data-act="del-user" data-id="' + esc(u.id) + '">' + (S.confirm === 'user' + u.id ? 'Потвърди премахването' : 'Премахни') + '</button></div>' : '') + '</td></tr>').join('') +
+    inv.map(i => '<tr><td class="wrap">' + esc(i.email) + ' <span class="chip">покана</span></td><td>' + (RL[i.role] || '') + '</td><td class="dim">важи до ' + esc(Core.fd(i.expires)) + '</td><td>' +
+      (own ? '<button class="btn small quiet" data-act="del-invite" data-id="' + esc(i.id) + '">Отмени поканата</button>' : '') + '</td></tr>').join('');
   return '<div class="head"><div><h1>' + esc(me.office || 'Кантора') + '</h1><p class="sub">Екип, пароли и архив на данните.</p></div></div>' + banner() +
-    '<div class="panel"><div class="pad"><h2>Екип</h2><div class="dim">Всички в екипа виждат всички фирми на кантората.</div></div><div class="scroll"><table style="min-width:420px"><tbody>' +
+    '<div class="panel"><div class="pad"><h2>Екип</h2><div class="dim">Всички в екипа виждат всички фирми на кантората. Собственикът кани и премахва колеги, трие фирми и вижда журнала и архива.</div></div><div class="scroll"><table style="min-width:520px"><tbody>' +
     (us ? rows : '<tr><td class="empty">Зареждане…</td></tr>') + '</tbody></table></div>' +
-    '<form class="pad" data-form="user"><div class="form"><label>Имейл на колегата<input type="email" id="user-email" name="email" required autocomplete="off"></label>' +
-    '<label>Временна парола (поне 10 знака)<input type="text" id="user-pass" name="password" required minlength="10" autocomplete="off"></label></div><div class="tools"><button class="btn primary" type="submit">Добави колега</button></div></form></div>' +
+    (own ? '<form class="pad" data-form="invite"><div class="form"><label>Имейл на колегата<input type="email" id="invite-email" name="email" required autocomplete="off"></label>' +
+      '<label>Роля<select id="invite-role" name="role"><option value="accountant">Счетоводител</option><option value="owner">Собственик</option></select></label></div>' +
+      '<div class="tools"><button class="btn primary" type="submit">Изпрати покана</button><span class="dim">Колегата получава връзка, валидна 7 дни, и сам задава паролата си.</span></div>' +
+      (S.inviteLink ? '<div class="note info" role="status">' + (S.inviteLink.mailed ? 'Изпратихме поканата до ' + esc(S.inviteLink.email) + '. Ако не стигне, предайте тази връзка:' : 'Имейлът не е настроен. Предайте тази връзка на ' + esc(S.inviteLink.email) + ' по сигурен канал:') +
+        '<div class="tools" style="margin-top:6px"><input id="invite-link" readonly value="' + esc(S.inviteLink.link) + '" style="flex:1;min-width:0"><button class="btn small" type="button" data-act="copy-invite">' + (S.copied === 'invite' ? 'Копирано' : 'Копирай връзката') + '</button></div></div>' : '') + '</form>'
+      : '<div class="pad dim">Само собственикът на кантората кани и премахва колеги.</div>') + '</div>' +
     '<form class="panel pad" data-form="pass"><h2>Смяна на паролата</h2><div class="form"><label>Текуща парола<input type="password" id="pass-old" name="old" required autocomplete="current-password" style="border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:var(--surface)"></label>' +
     '<label>Нова парола (поне 10 знака)<input type="password" id="pass-new" name="next" required minlength="10" autocomplete="new-password" style="border:1px solid var(--line);border-radius:8px;padding:7px 10px;background:var(--surface)"></label></div><div class="tools"><button class="btn primary" type="submit">Смени паролата</button></div></form>' +
     '<div class="panel pad"><h2>Данни и настройки</h2><dl class="fields"><dt>Разчитане с Claude</dt><dd>' + (me.ai ? 'включено' : 'изключено, документите се въвеждат ръчно') + '</dd>' +
     '<dt>Изпращане на имейли</dt><dd>' + (me.mail ? 'настроено' : 'не е настроено, текстовете се копират ръчно') + '</dd>' +
     '<dt>Автоматични напомняния</dt><dd>' + (me.mail ? 'на всеки ' + plural(me.remindDays || 3, 'ден', 'дни') + ' в работно време, за фирмите с отметка' : 'изискват настроен имейл') + '</dd></dl>' +
-    '<div class="tools"><a class="btn" href="/api/backup" download>Изтегли архив на данните (JSON)</a><span class="dim">Съдържа фирмите и всички месеци, без оригиналните файлове.</span></div></div>';
+    (me.role === 'owner' ? '<div class="tools"><a class="btn" href="/api/backup" download>Изтегли архив на данните (JSON)</a><span class="dim">Съдържа фирмите и всички месеци, без оригиналните файлове.</span></div>' : '<div class="dim">Архивът на данните се изтегля от собственика на кантората.</div>') + '</div>';
 }
 
 function render(){
@@ -1212,8 +1236,8 @@ function render(){
   $('nav').innerHTML = VIEWS.map(([id, label]) => '<a href="#' + id + '"' + (id === v ? ' class="on" aria-current="page"' : '') + '>' + label +
     (id in counts ? '<span class="count' + (counts[id] ? '' : ' zero') + '">' + counts[id] + '</span>' : '') + '</a>').join('');
   $('foot').innerHTML = '<div>' + (S.mode === 'db' ? (window.FB ? 'Данните се пазят на сървъра.' : 'Данните се пазят в този артефакт.') : S.mode === 'mem' ? 'Временен режим, без запазване.' : 'Свързване…') + '</div><div>Разчитане с Claude: ' + (sample ? (imgOK ? 'включено' : 'само текст') : 'няма') + '</div>' +
-    (window.FB && FB.me ? '<div>' + esc(FB.me.office) + '<br>' + esc(FB.me.email) + '</div><div><a href="/account">Сигурност и журнал</a></div><div><button class="btn small" data-act="logout">Изход</button></div>' : '');
-  $('main').innerHTML = {clients: vClients, reconcile: vReconcile, inbox: vInbox, reminders: vReminders, export: vExport, rules: vRules, office: vOffice}[v]();
+    (window.FB && FB.me ? '<div>' + esc(FB.me.office) + '<br>' + esc(FB.me.email) + '</div><div><a href="/security">Сигурност и журнал</a></div><div><button class="btn small" data-act="logout">Изход</button></div>' : '');
+  $('main').innerHTML = (window.FB && FB.me && FB.me.verified === false ? '<div class="note warn" role="status">Потвърдете имейла си с връзката, която Ви изпратихме. Дотогава FinBridge не изпраща писма до клиентите. <button class="btn small" data-act="verify-resend">Изпрати писмото отново</button></div>' : '') + {clients: vClients, reconcile: vReconcile, inbox: vInbox, reminders: vReminders, export: vExport, rules: vRules, office: vOffice}[v]();
 }
 function go(h){ if (location.hash === '#' + h) render(); else location.hash = h; }
 async function copy(text, flag){
@@ -1277,7 +1301,11 @@ document.addEventListener('click', async e => {
     case 'col-up': case 'col-down': { const on = (S.ecfg.cols && S.ecfg.cols.length ? S.ecfg.cols : Core.DEFAULT_COLS).slice(), i = on.indexOf(id), j = act === 'col-up' ? i - 1 : i + 1;
       if (i >= 0 && j >= 0 && j < on.length){ [on[i], on[j]] = [on[j], on[i]]; S.ecfg.cols = on; saveEcfg(); } S.setupOpen = true; break; }
     case 'col-reset': S.ecfg = {}; saveEcfg(); S.setupOpen = true; break;
+    case 'user-role': try { await FB.setRole(id, el.dataset.role); S.users = await FB.users(); S.toast = {cls: 'good', text: 'Ролята е сменена.'}; } catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Неуспешно.'}; } break;
+    case 'del-invite': try { await FB.cancelInvite(id); S.invites = await FB.invites(); S.inviteLink = null; S.toast = {cls: 'good', text: 'Поканата е отменена.'}; } catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Неуспешно.'}; } break;
+    case 'copy-invite': return copy(S.inviteLink.link, 'invite');
     case 'del-user': if (conf !== 'user' + id){ S.confirm = 'user' + id; break; } try { await FB.delUser(id); S.users = await FB.users(); S.toast = {cls: 'good', text: 'Достъпът е премахнат.'}; } catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Неуспешно.'}; } break;
+    case 'verify-resend': try { await FB.resendVerify(); S.toast = {cls: 'good', text: 'Изпратихме ново писмо за потвърждение.'}; } catch (x) { S.toast = {cls: 'crit', text: x.message || 'Писмото не беше изпратено.'}; } break;
     case 'logout': await FB.logout(); return;
     case 'copy-portal': return copy(firmById(id).portal, 'portal');
     case 'reset-portal': if (conf !== 'portal' + id){ S.confirm = 'portal' + id; break; } try { const url = await FB.resetPortal(id); firmById(id).portal = url; S.editing = {type: 'firm', data: firmById(id)}; } catch (err) { S.toast = {cls: 'crit', text: 'Връзката не беше сменена.'}; } break;
@@ -1306,8 +1334,8 @@ document.addEventListener('submit', async e => {
     catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Въпросът не беше изпратен.'}; }
     S.editing = null; return render();
   }
-  if (form.dataset.form === 'user'){
-    try { await FB.addUser(t(v.email), v.password); S.users = await FB.users(); S.toast = {cls: 'good', text: 'Добавен е ' + t(v.email) + '. Предайте му паролата по сигурен канал.'}; }
+  if (form.dataset.form === 'invite'){
+    try { const r = await FB.invite(t(v.email).toLowerCase(), v.role); S.inviteLink = {link: r.link, mailed: r.mailed, email: r.invite.email}; S.invites = await FB.invites(); S.toast = {cls: 'good', text: 'Поканата за ' + r.invite.email + ' е готова.'}; }
     catch (err) { S.toast = {cls: 'crit', text: (err && err.message) || 'Неуспешно.'}; }
     return render();
   }
@@ -1370,7 +1398,7 @@ document.addEventListener('dragleave', e => { const z = e.target.closest && e.ta
 document.addEventListener('drop', e => { const z = e.target.closest && e.target.closest('[data-drop]'); if (!z) return; e.preventDefault(); const fs = e.dataTransfer.files; if (!fs.length) return;
   if (z.dataset.drop === 'docs') onDocs(fs); else onStatement(fs[0]); });
 document.addEventListener('toggle', e => { if (e.target.id === 'exp-setup') S.setupOpen = e.target.open; }, true);
-function loadOffice(){ if (window.FB && view() === 'office') FB.users().then(u => { S.users = u; render(); }).catch(() => {}); }
+function loadOffice(){ if (window.FB && view() === 'office') Promise.all([FB.users(), (FB.me || {}).role === 'owner' ? FB.invites() : []]).then(([u, i]) => { S.users = u; S.invites = i; render(); }).catch(() => {}); }
 window.addEventListener('hashchange', () => { S.editing = null; S.confirm = null; render(); loadOffice(); });
 boot();
 </script>
