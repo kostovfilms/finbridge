@@ -1,7 +1,0 @@
-node_modules/
-browser-profile/
-.env
-output/*
-!output/.gitkeep
-logs/*
-!logs/.gitkeep
