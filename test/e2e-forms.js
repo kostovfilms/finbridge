@@ -17,7 +17,9 @@ const B='http://127.0.0.1:8991',PW='dostatachno-dalga';let n=0;const ok=m=>conso
   /* №10 */
   await p.click('[data-act=void]');await p.waitForSelector('button:has-text("Потвърди анулирането")');assert(await p.locator('.pill:has-text("Анулирана")').count()===0);await p.click('[data-act=void]');await p.waitForSelector('.note.good:has-text("анулирана")');assert.equal(await p.locator('[data-act=reopen-inv]').count(),0);ok('#10 voiding asks for confirmation and a voided invoice cannot be reopened');
   /* №14 */
-  await p.click('#nav a:has-text("Плащания")');await p.waitForSelector('[data-act=new][data-type=bill]');await p.focus('[data-act=new][data-type=bill]');await p.evaluate(()=>{window.__renders=0;new MutationObserver(()=>window.__renders++).observe(document.getElementById('main'),{childList:true})});
+  await p.click('#nav a:has-text("Плащания")');await p.waitForSelector('[data-act=new][data-type=bill]');await p.evaluate(()=>{window.__renders=0;window.__last=Date.now();new MutationObserver(()=>{window.__renders++;window.__last=Date.now()}).observe(document.getElementById('main'),{childList:true})});
+  /* разделът се рисува втори път, когато дойдат данните: фокусът се слага след това */
+  await p.waitForFunction(()=>Date.now()-window.__last>1000,null,{timeout:10000});await p.focus('[data-act=new][data-type=bill]');await p.evaluate(()=>{window.__renders=0});
   await p.waitForTimeout(21500);assert.deepEqual(await p.evaluate(()=>[window.__renders,document.activeElement.dataset.act,document.getElementById('main').getAttribute('aria-live')]),[0,'new',null]);ok('#14 the 20-second refresh leaves the page and keyboard focus alone when nothing changed');
   /* опресняване, по време на което данните се сменят и потребителят мести фокуса: фокусът остава при потребителя */
   await p.evaluate(()=>{const f=window.fetch;window.fetch=async(u,o)=>{const slow=String(u).includes('/api/fin/state')&&window.__slow;if(slow){window.__slow=false;window.__inflight=true}const r=await f(u,o);if(slow){await new Promise(z=>setTimeout(z,1500));window.__done=true}return r}});
@@ -26,6 +28,11 @@ const B='http://127.0.0.1:8991',PW='dostatachno-dalga';let n=0;const ok=m=>conso
   await p.waitForFunction(()=>window.__inflight,null,{timeout:25000});await p.focus('#nav a[data-view=invoice]');
   await p.waitForFunction(()=>window.__done,null,{timeout:5000});await p.waitForSelector('tr:has-text("Нов доставчик ЕООД")');
   assert.equal(await p.evaluate(()=>document.activeElement.dataset.view),'invoice');ok('#14 when the data changes during a refresh, keyboard focus stays where the user moved it');
+  /* с клавиатурата към друг раздел при бавна мрежа: и двете рисувания оставят фокуса на връзката */
+  await p.evaluate(()=>{window.__slow=true;window.__inflight=false;window.__done=false});await p.focus('#nav a[data-view=expense]');await p.keyboard.press('Enter');
+  await p.waitForFunction(()=>window.__inflight,null,{timeout:5000});assert.equal(await p.evaluate(()=>document.activeElement.dataset.view),'expense');
+  await p.waitForFunction(()=>window.__done,null,{timeout:5000});await p.waitForSelector('#nav a[data-view=expense].on');await p.waitForTimeout(100);
+  assert.equal(await p.evaluate(()=>document.activeElement.dataset.view),'expense');ok('#14 moving to another section with the keyboard keeps focus on the link, before and after the data arrives');
   assert.deepEqual(errs,[]);console.log('E2E forms: all '+n+' steps passed');
   }finally{await br.close();srv.stop()}
 })().catch(e=>{console.error('E2E forms FAIL after step '+n+':',e.message);process.exit(1)});

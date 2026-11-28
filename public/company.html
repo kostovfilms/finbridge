@@ -527,9 +527,10 @@ function render(){
 }
 async function go(v){ S.view = v; if (location.hash.slice(1) !== v) history.replaceState(null, '', '#' + v); S.form = null; S.reject = null; S.pay = null; S.issue = null; S.credit = null; S.print = null; S.confirm = null; S.msg = null; S.filter = { status: '', q: '' };
   /* Разделът с формите за екипа се рисува веднъж, след зареждането, за да не се губи въведеното. */
-  if (v !== 'team') render();
+  if (v !== 'team') renderKeep();
   try { await load(); if (v === 'team'){ S.users = await api('GET', '/api/fin/users'); S.invites = await api('GET', '/api/fin/invites'); } } catch (e) { S.msg = { cls: 'crit', text: e.message }; }
-  if (S.view === v && (v === 'team' || (!S.form && !S.reject && !S.pay && !S.issue && !S.credit))) render(); }
+  /* второто рисуване, след данните, оставя фокуса там, където е потребителят */
+  if (S.view === v && (v === 'team' || (!S.form && !S.reject && !S.pay && !S.issue && !S.credit))) renderKeep(); }
 const status = (id, status, note) => api('POST', '/api/fin/items/' + id + '/status', { status, note });
 /* Разчитане на документ: снимката се смалява, изпраща се за разчитане и полетата се попълват. Потребителят винаги проверява и потвърждава. */
 S.scanSeq = 0; S.scanFile = null;
@@ -657,10 +658,11 @@ document.addEventListener('input', e => {
 load().then(() => { const h = location.hash.slice(1); if (VIEWS.some(v => v[0] === h && v[2](role()))) return go(h); render(); }).catch(e => { $('main').innerHTML = '<div class="note crit">' + esc(e.message) + '</div>'; });
 addEventListener('hashchange', () => { const h = location.hash.slice(1); if (S.st && h !== S.view && VIEWS.some(v => v[0] === h && v[2](role()))) go(h); });
 /* Фокусът се запомня точно преди прерисуването, не при началото на заявката: междувременно потребителят може да е минал на друг бутон. */
-const focusSel = () => { const el = document.activeElement; if (!el || el === document.body) return ''; if (el.id) return '#' + CSS.escape(el.id); const d = el.dataset || {};
-  return d.act ? '[data-act="' + CSS.escape(d.act) + '"]' + (d.id ? '[data-id="' + CSS.escape(d.id) + '"]' : '') + (d.type ? '[data-type="' + CSS.escape(d.type) + '"]' : '') : d.view ? '[data-view="' + CSS.escape(d.view) + '"]' : ''; };
+function focusSel(){ const el = document.activeElement; if (!el || el === document.body) return ''; if (el.id) return '#' + CSS.escape(el.id); const d = el.dataset || {};
+  return d.act ? '[data-act="' + CSS.escape(d.act) + '"]' + (d.id ? '[data-id="' + CSS.escape(d.id) + '"]' : '') + (d.type ? '[data-type="' + CSS.escape(d.type) + '"]' : '') : d.view ? '[data-view="' + CSS.escape(d.view) + '"]' : ''; }
+function renderKeep(){ const sel = focusSel(); render(); const n = sel && document.querySelector(sel); if (n && n !== document.activeElement) n.focus({ preventScroll: true }); }
 setInterval(() => { if (!S.form && !S.reject && !S.pay && !S.issue && !S.credit && !S.print && !S.busy && S.view !== 'team' && document.activeElement.id !== 'f-q'){ const before = JSON.stringify(S.st);
-    load().then(() => { if (JSON.stringify(S.st) === before || S.form || S.reject || S.pay || S.issue || S.credit || S.print || S.busy) return; const sel = focusSel(); render(); const n = sel && document.querySelector(sel); if (n) n.focus({ preventScroll: true }); }).catch(() => {}); } }, 20000);
+    load().then(() => { if (JSON.stringify(S.st) === before || S.form || S.reject || S.pay || S.issue || S.credit || S.print || S.busy) return; renderKeep(); }).catch(() => {}); } }, 20000);
 })();
 </script>
 </body>
