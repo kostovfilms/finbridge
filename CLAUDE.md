@@ -39,11 +39,11 @@ node server.js      # PORT, DATA_DIR; виж README за останалите н
 
 ## Състояние към 28.11.2026
 
-- `main`: всичко до PR #4 (разчитане на документи, мобилен вид, кредитни известия, повтарящи се фактури, одит с 12 поправки).
-- PR #5 (клон `hardening-2fa-audit-csp`, отворен): CSP с nonce, системни шрифтове, двуфакторен вход, журнал на действията, поправки на всички 29 находки от `REVIEW.md` (№16–29 на 27.11.2026, тестове в `test/review2.test.js` и `test/e2e-review2.js`).
-- 28.11.2026: CI пуска и `npm run test:e2e`; `autoDeployTrigger: 'off'` в двата файла за Render; пази го `test/config.test.js`. Първото пускане в GitHub не е видяно.
-- 28.11.2026: транзакции (`tx()`), QR код (`qr.js`) и `TOTP_KEY`, известия (`ALERT_EMAIL`, `ALERT_WEBHOOK`), роли в кантората и покани с връзка (`invites`). Тестове: `tx`, `totp-key`, `alerts`, `invites`.
-- 28.11.2026: `main` (PR #6 lead-agent и PR #7 от друга сесия: 2FA, журнал, CSP, фактура по имейл) е слят в клона. При дублиране остава версията на PR #5; от PR #7 са взети фактура по имейл, `POST /api/fin/refresh` и `lead-agent/`. Решенията са в `DECISIONS.md`.
+- `main`: всичко до PR #7 включително. PR #5 (клон `hardening-2fa-audit-csp`) е слят на 28.11.2026: CSP с nonce, системни шрифтове, двуфакторен вход, журнал на действията, поправки на всички 29 находки от `REVIEW.md` (тестове в `test/review.test.js`, `test/review2.test.js`, `test/e2e-review2.js`).
+- CI пуска `npm test` и `npm run test:e2e`; `autoDeployTrigger: 'off'` в двата файла за Render; пази го `test/config.test.js`. Render не качва сам: собственикът пуска Manual Deploy.
+- Транзакции (`tx()`), QR код (`qr.js`) и `TOTP_KEY`, известия (`ALERT_EMAIL`, `ALERT_WEBHOOK`), роли в кантората и покани с връзка (`invites`). Тестове: `tx`, `totp-key`, `alerts`, `invites`.
+- PR #7 от друга сесия дублираше 2FA, журнал и CSP. Остана версията на PR #5; от PR #7 са взети фактура по имейл и `POST /api/fin/refresh`. Решенията са в `DECISIONS.md`.
+- `lead-agent/` (PR #6) не е част от FinBridge. На 28.11.2026 е изнесен в отделна папка `lead-agent` до тази и е махнат от хранилището. Не го връщай тук.
 - Тестовете изключват `EMAIL_VERIFY` по подразбиране в `test/helpers.js`; тест, който проверява потвърждението, го включва изрично.
 - Не е изпитано с истински данни: Claude ключ, SMTP през TLS, реални банкови извлечения, живият сайт, истински телефон за 2FA.
 - Чака от собственика: платен хостинг с диск, образци от Delta Pro и Ажур, `ANTHROPIC_API_KEY`, SMTP доставчик.

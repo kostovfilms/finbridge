@@ -1,6 +1,6 @@
 # Напредък (FinBridge)
 
-- [x] Lead agent (`lead-agent/`), слят в `main`
+- [x] Lead agent е изнесен от хранилището в отделна папка `lead-agent` до FinBridge (28.11.2026)
 - [x] CSP без `'unsafe-inline'` за скриптове
 - [x] Без външни шрифтове (системни; след сливането с PR #5)
 - [x] `GET /api/fin/state` без записи; `POST /api/fin/refresh`

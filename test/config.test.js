@@ -27,4 +27,9 @@ const files=fs.readdirSync(__dirname);
 for(const f of files.filter(f=>/\.test\.js$/.test(f)))assert(pkg.scripts.test.includes('test/'+f),f+' липсва в npm test');
 for(const f of files.filter(f=>/^e2e.*\.js$/.test(f)))assert(pkg.scripts['test:e2e'].includes('test/'+f),f+' липсва в npm run test:e2e');
 ok('every test file is part of npm test or npm run test:e2e, and there are no dependencies');
+/* lead-agent е отделен продукт и живее извън хранилището (DECISIONS.md, „Изнасяне на lead-agent“) */
+assert(!fs.existsSync(path.join(__dirname,'..','lead-agent')),'папката lead-agent не е част от FinBridge');
+assert(!live(R('.dockerignore')).some(l=>l.trim()==='lead-agent'),'.dockerignore не споменава lead-agent');
+assert(!/lead-agent/.test(JSON.stringify(pkg)),'package.json не споменава lead-agent');
+ok('lead-agent is not part of this repository');
 console.log('config: all '+n+' checks passed');
